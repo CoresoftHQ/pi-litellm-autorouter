@@ -8,7 +8,7 @@ solves "run an agent loop against any provider". This extension is the missing s
 routing engine to TypeScript and wires it to `pi.setModel()`, so routing happens in the agent — with pi's own
 model registry, credentials, and thinking levels — instead of behind a separate proxy hop.
 
-> **Status: working, unproven in anger.** The router is implemented and unit-tested (132 tests,
+> **Status: working, unproven in anger.** The router is implemented and unit-tested (145 tests,
 > `npm run check`), and the extension loads in pi 0.84.2. The blocking design question — whether
 > `pi.setModel()` affects the turn already in flight — is [verified: it does](docs/seam.md). What has *not*
 > happened is a real session with real credentials routing real work, so treat the defaults as untuned. See
@@ -556,6 +556,25 @@ that yourself, and consider `classifierFallback: "default_model"` since the heur
 }
 ```
 
+`/autoroute next <model>` forces a specific model for the **next prompt only**, then reverts to normal
+routing. It is the override for the case the router cannot know about — you can see this next prompt is harder
+(or more trivial) than it reads:
+
+```
+/autoroute next anthropic/claude-opus-5
+> now refactor the scheduler so the retry path is reentrant
+```
+
+It outranks everything: keyword rules, the classifier, the plan-mode floor, a session pin, and even
+`/autoroute off` — naming a model is the most explicit signal a user can give, and it is scoped to one prompt.
+A session pin is left untouched, so the turn after returns to the session's own model. The model name is
+validated when you type the command rather than when the prompt runs, so a typo fails while you are still
+looking at it. If the model turns out to be unusable at the prompt (no credentials), the override is still
+spent — one that survived would silently hijack the next prompt too — and the turn falls back to ordinary
+routing with the reason recorded.
+
+Use `pin` instead when you want it to stick, and `next` when you want it once.
+
 `escalationKeywords` are case-sensitive phrases that bump the result exactly one tier. Users can force a
 stronger model, never choose which one — which is the whole point: it is a sanctioned nudge, not a way to pin
 yourself to the most expensive model.
@@ -631,6 +650,8 @@ you still emit it.
 |---|---|
 | `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach |
 | `/autoroute` | Current classifier, last decision, tier, and score |
+| `/autoroute next <model>` | Force a model for the **next prompt only**, then revert |
+| `/autoroute next` | Clear a pending one-shot override |
 | `/autoroute off` / `on` | Toggle routing for the session |
 | `/autoroute pin <model>` | Freeze on one model until unpinned |
 | `/autoroute escalate` | Re-run the last prompt one tier up (the `escalation_keywords` path, as a command) |

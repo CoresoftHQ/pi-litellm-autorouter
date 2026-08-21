@@ -103,7 +103,18 @@ integration contract — a plan-mode extension emits `autoroute:plan-mode` `{ ac
 event bus — with `planMode.patterns` as the text-sentinel fallback, which is the mechanism upstream is stuck
 with.
 
+- [x] `/autoroute next <model>` — a one-shot override forcing a model for the next prompt only. Outranks
+      keyword rules, the classifier, the plan-mode floor, a session pin and `/autoroute off`; leaves the pin
+      intact; validated at command time; spent even when it fails to apply.
 - [ ] `/autoroute escalate` as an ergonomic front door for the keyword.
+
+**Bug found while wiring the override.** Our own `pi.setModel()` raises `model_select`, and the guard
+distinguishing that echo from a real hand pick compared against `lastDecision` — which is not assigned until
+`route()` has returned, so during `setModel` it still holds the *previous* turn's model. In real pi the
+router would have disabled itself the moment it made its first decision. The existing test missed it because
+the mock fired `model_select` from the test body, after the fact, rather than from inside `setModel` as pi
+does. Fixed with a flag held across the routing call; the mock now reproduces pi's ordering, and reverting
+the fix fails the test.
 
 ## Phase 6 — Affinity and cache-cost measurement
 

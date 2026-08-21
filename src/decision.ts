@@ -16,6 +16,9 @@ export interface AutorouteState {
   disabled?: boolean;
   /** A model the user pinned by hand; the router leaves the session alone while set. */
   pinnedModel?: string | null;
+  /** A model forced for the next prompt only, then cleared. Outranks everything else,
+   *  including `disabled` and `pinnedModel` — it is a deliberate one-off instruction. */
+  nextModel?: string | null;
 }
 
 /** Compact footer text: `⏵ COMPLEX · claude-sonnet-5`. */

@@ -173,6 +173,88 @@ describe("route — precedence", () => {
   });
 });
 
+describe("route — one-shot override", () => {
+  it("uses the named model and reports it as consumed", async () => {
+    const api = applier();
+    const { decision, consumedOneShot } = await route({
+      turn: turn("hi"),
+      config: config(),
+      api,
+      oneShot: "anthropic/opus",
+      now,
+    });
+    expect(decision.cause).toBe("one_shot_override");
+    expect(decision.chosenModel).toBe("anthropic/opus");
+    expect(consumedOneShot).toBe(true);
+  });
+
+  it("outranks a keyword rule and the classifier", async () => {
+    const api = applier();
+    const cfg = config({ keywordTierRules: [{ keywords: ["migration"], tier: "SIMPLE" }] });
+    const { decision } = await route({
+      turn: turn("do the migration"),
+      config: cfg,
+      api,
+      oneShot: "anthropic/opus",
+      now,
+    });
+    expect(decision.chosenModel).toBe("anthropic/opus");
+  });
+
+  it("outranks the plan-mode floor", async () => {
+    // The floor exists to stop planning being under-powered; naming a model is the more
+    // explicit signal, and it is scoped to one prompt.
+    const api = applier();
+    const cfg = config({ planMode: { minTier: "REASONING" } });
+    const { decision } = await route({
+      turn: turn("hi"),
+      config: cfg,
+      api,
+      planModeActive: true,
+      oneShot: "anthropic/haiku",
+      now,
+    });
+    expect(decision.chosenModel).toBe("anthropic/haiku");
+  });
+
+  it("outranks a session pin without disturbing it", async () => {
+    const api = applier();
+    const cfg = config({ sessionAffinity: true });
+    const pin = { model: "anthropic/haiku", tier: "SIMPLE" as const, expiresAt: now() + 60_000 };
+    const { decision, pinToWrite } = await route({
+      turn: turn("hi"),
+      config: cfg,
+      api,
+      pin,
+      oneShot: "anthropic/opus",
+      now,
+    });
+    expect(decision.chosenModel).toBe("anthropic/opus");
+    // The pin is untouched, so the session returns to its own model next turn.
+    expect(pinToWrite).toBeNull();
+  });
+
+  it("falls back to normal routing when the override cannot be applied", async () => {
+    const api = applier({ find: (_p, id) => (id === "ghost" ? undefined : { provider: "anthropic", id }) });
+    const { decision, consumedOneShot } = await route({
+      turn: turn("hi"),
+      config: config(),
+      api,
+      oneShot: "anthropic/ghost",
+      now,
+    });
+    expect(decision.chosenModel).toBe("anthropic/haiku");
+    expect(decision.fellBackBecause).toContain("could not be applied");
+    // Spent even though it failed: an override that survived would hijack the next prompt.
+    expect(consumedOneShot).toBe(true);
+  });
+
+  it("is not consumed when no override is set", async () => {
+    const { consumedOneShot } = await route({ turn: turn("hi"), config: config(), api: applier(), now });
+    expect(consumedOneShot).toBe(false);
+  });
+});
+
 describe("route — session affinity", () => {
   const pin = { model: "anthropic/opus", tier: "REASONING" as const, expiresAt: now() + 60_000 };
 

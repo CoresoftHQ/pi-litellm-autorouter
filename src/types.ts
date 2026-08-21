@@ -34,6 +34,7 @@ export interface TierTarget {
 /** Why a particular model was chosen. Mirrors LiteLLM's `routing_decision.cause`
  *  so decisions stay comparable across the two implementations. */
 export type DecisionCause =
+  | "one_shot_override"
   | "heuristic_scorer"
   | "reasoning_override"
   | "llm_classifier"

@@ -20,6 +20,9 @@ type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
 function mockPi() {
   const handlers = new Map<string, Handler[]>();
+  /** Set by a test to make setModel raise model_select, the way real pi does. */
+  let modelSelectEcho = false;
+  let echoCtx: unknown = {};
   const busHandlers = new Map<string, ((payload: unknown) => void)[]>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const flags = new Map<string, unknown>();
@@ -45,6 +48,15 @@ function mockPi() {
     appendEntry: vi.fn((type: string, data: unknown) => entries.push({ type, data })),
     setModel: vi.fn(async (model: { provider: string; id: string }) => {
       setModelCalls.push(`${model.provider}/${model.id}`);
+      // Real pi raises model_select from inside setModel. Firing it here rather than from
+      // the test body is what makes the echo-suppression path testable at all: at this
+      // moment the extension has not yet recorded the decision, which is exactly the
+      // window in which a naive guard mistakes our own call for the user's.
+      if (modelSelectEcho) {
+        for (const handler of handlers.get("model_select") ?? []) {
+          await handler({ source: "set", model }, echoCtx);
+        }
+      }
       return true;
     }),
     setThinkingLevel: vi.fn((level: string) => thinkingCalls.push(level)),
@@ -61,7 +73,23 @@ function mockPi() {
     for (const handler of busHandlers.get(name) ?? []) handler(payload);
   };
 
-  return { pi, fire, emit, commands, entries, setModelCalls, thinkingCalls, flags, handlers };
+  const enableModelSelectEcho = (ctx: unknown): void => {
+    modelSelectEcho = true;
+    echoCtx = ctx;
+  };
+
+  return {
+    pi,
+    fire,
+    emit,
+    commands,
+    entries,
+    setModelCalls,
+    thinkingCalls,
+    flags,
+    handlers,
+    enableModelSelectEcho,
+  };
 }
 
 const CATALOGUE = [
@@ -212,6 +240,39 @@ describe("extension wiring", () => {
     expect(m.setModelCalls).toEqual([]);
   });
 
+  it("keeps routing when setModel raises model_select from inside the routing call", async () => {
+    // The ordering that matters: real pi fires model_select *during* setModel, before the
+    // extension has recorded the decision. A guard that compares against the last decision
+    // sees the previous turn's model, treats our own call as a hand pick, and disables the
+    // router after its very first decision.
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    m.enableModelSelectEcho(ctx);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    await m.fire("input", { text: "hi again", source: "interactive" }, ctx);
+    await m.fire("input", { text: "and again", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/haiku", "anthropic/haiku", "anthropic/haiku"]);
+  });
+
+  it("still yields to a genuine hand pick while the echo guard is armed", async () => {
+    // The suppression must be scoped to our own call, not a blanket "ignore model_select".
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    m.enableModelSelectEcho(ctx);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    await m.fire("model_select", { source: "set", model: { provider: "anthropic", id: "opus" } }, ctx);
+    await m.fire("input", { text: "hi again", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/haiku"]);
+  });
+
   it("keeps routing when the model changed because we changed it", async () => {
     // Our own setModel comes back as a model_select event; treating that as a hand pick
     // would disable the router after its first decision.
@@ -288,6 +349,82 @@ describe("extension wiring", () => {
     expect(m.setModelCalls).toEqual(["anthropic/sonnet"]);
     const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
     expect(decision.planFloored).toBe(true);
+  });
+
+  it("forces a model for exactly one prompt, then reverts", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/opus", ctx);
+
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    // First prompt overridden; second classified normally.
+    expect(m.setModelCalls).toEqual(["anthropic/opus", "anthropic/haiku"]);
+
+    const decisions = m.entries
+      .filter((e) => e.type === DECISION_ENTRY_TYPE)
+      .map((e) => e.data as RouteDecision);
+    expect(decisions[0]?.cause).toBe("one_shot_override");
+    expect(decisions[1]?.cause).toBe("heuristic_scorer");
+  });
+
+  it("rejects an unknown model at command time rather than at the next prompt", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, {
+      modelRegistry: { find: () => undefined, getAvailable: () => CATALOGUE, complete: vi.fn() },
+    });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/nope", ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("not a model pi knows"), "error");
+  });
+
+  it("clears a pending override with a bare `next`", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/opus", ctx);
+    await m.commands.get("autoroute")!.handler("next", ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/haiku"]);
+  });
+
+  it("honours an override even while routing is switched off", async () => {
+    // An explicit one-off instruction outranks "off"; "off" still holds from the next
+    // prompt onwards.
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("off", ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/opus", ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+  });
+
+  it("does not spend the override on a mid-stream steer", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/opus", ctx);
+    await m.fire("input", { text: "hi", source: "interactive", streamingBehavior: "steer" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
   });
 
   it("writes a config from the available models and routes with it immediately", async () => {

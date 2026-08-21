@@ -43,6 +43,9 @@ export interface RouteInput {
   planModeActive?: boolean;
   /** The active session pin, if session affinity is on and one has been set. */
   pin?: SessionPin | null;
+  /** A model the user forced for this one prompt via `/autoroute next`. Outranks
+   *  everything, including the plan-mode floor and a session pin. */
+  oneShot?: string | null;
   /** Injected for testability; defaults to `Date.now`. */
   now?: () => number;
   callerSystemPrompt?: string;
@@ -52,6 +55,10 @@ export interface RouteOutput {
   decision: RouteDecision;
   /** The pin to store for this session, or null to leave the existing one alone. */
   pinToWrite: SessionPin | null;
+  /** True when a one-shot override was used up on this turn and the caller should clear
+   *  it. Set even if the model could not be applied — a failed override is still spent,
+   *  or it would silently leak into the next prompt. */
+  consumedOneShot: boolean;
 }
 
 function emptyDecision(): RouteDecision {
@@ -118,6 +125,8 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const { config, turn, api } = input;
   const decision = emptyDecision();
 
+  let consumedOneShot = false;
+
   const finish = async (
     tier: Tier | null,
     pinToWrite: SessionPin | null,
@@ -133,11 +142,34 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
       decision.thinkingLevel = applied.thinkingLevel;
       if (applied.fellBackBecause) decision.fellBackBecause = applied.fellBackBecause;
       // A pin is only worth writing for a model that was actually applied.
-      return { decision, pinToWrite: pinToWrite ? { ...pinToWrite, model: applied.model } : null };
+      return {
+        decision,
+        pinToWrite: pinToWrite ? { ...pinToWrite, model: applied.model } : null,
+        consumedOneShot,
+      };
     }
     if (problems.length > 0) decision.fellBackBecause = problems.join("; ");
-    return { decision, pinToWrite: null };
+    return { decision, pinToWrite: null, consumedOneShot };
   };
+
+  // ── 0. One-shot override ───────────────────────────────────────────────────
+  // The most explicit signal there is: the user naming a model for this prompt. It
+  // outranks the plan-mode floor and a session pin alike, and is spent whether or not it
+  // could be applied — a failed override that survived would silently hijack the next
+  // prompt too.
+  if (input.oneShot) {
+    consumedOneShot = true;
+    decision.cause = "one_shot_override";
+    decision.signals = ["one_shot_override"];
+    const result = await finish(null, null, [{ model: input.oneShot }]);
+    if (result.decision.chosenModel) return result;
+    // Could not be applied. Rather than leave the turn on whatever model happened to be
+    // active, fall through to ordinary routing — the decision record keeps the reason.
+    decision.cause = "default_fallback";
+    decision.fellBackBecause = `one-shot override "${input.oneShot}" could not be applied${
+      result.decision.fellBackBecause ? `: ${result.decision.fellBackBecause}` : ""
+    }`;
+  }
 
   const escalationKeyword = turn.currentAsk
     ? matchedEscalationKeyword(turn.currentAsk, config.escalationKeywords)

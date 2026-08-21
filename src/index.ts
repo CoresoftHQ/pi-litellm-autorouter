@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type RouterConfig, loadConfig } from "./config.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
+import { splitModelRef } from "./classify/llm.ts";
 import {
   type AutorouteState,
   DECISION_ENTRY_TYPE,
@@ -39,6 +40,11 @@ export default function autorouter(pi: ExtensionAPI): void {
   let pin: SessionPin | null = null;
   let lastDecision: RouteDecision | null = null;
   let planModeActive = false;
+  /** Model refs for command completion; the completion callback gets no context. */
+  let availableRefs: string[] = [];
+  /** True while our own setModel calls are in flight, so their model_select echoes are
+   *  not mistaken for the user picking a model by hand. */
+  let applyingOwnModel = false;
 
   pi.registerFlag("no-autoroute", {
     description: "Start with automatic model routing disabled",
@@ -103,6 +109,11 @@ export default function autorouter(pi: ExtensionAPI): void {
     configErrors = loaded.errors;
     configSources = loaded.sources;
     restoreState(ctx);
+    try {
+      availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+    } catch {
+      availableRefs = [];
+    }
 
     if (configErrors.length > 0 && ctx.hasUI) {
       // Loud, but not fatal: a broken router config must not stop the agent from starting.
@@ -135,10 +146,17 @@ export default function autorouter(pi: ExtensionAPI): void {
   // A model the user chose by hand outranks the router until they clear it.
   pi.on("model_select", async (event) => {
     if (event.source !== "set") return;
+    // Our own pi.setModel() also raises model_select. Mistaking that echo for a hand pick
+    // would have the router disable itself the moment it made its first decision, so the
+    // echo is suppressed by a flag held across the routing call rather than by comparing
+    // against lastDecision — which is not assigned until route() has already returned, and
+    // so is still the *previous* turn's model while setModel is running.
+    if (applyingOwnModel) return;
     const model = event.model;
     if (!model) return;
     const ref = `${model.provider}/${model.id}`;
-    // Ignore the echo of our own setModel call.
+    // Belt and braces for an echo delivered after route() returned, when lastDecision is
+    // current.
     if (lastDecision?.chosenModel === ref) return;
     state.pinnedModel = ref;
     persistState();
@@ -152,8 +170,13 @@ export default function autorouter(pi: ExtensionAPI): void {
     // switching models would break the conversation's provider-specific message shapes.
     if (event.streamingBehavior) return { action: "continue" as const };
 
+    // A one-shot override is an explicit instruction for this prompt, so it is honoured
+    // even when routing is otherwise off or pinned. It is checked before those, and always
+    // cleared afterwards, so "off" still means off from the next prompt onwards.
+    const oneShot = state.nextModel ?? null;
+
     const disabled = routingDisabled();
-    if (disabled || !config) return { action: "continue" as const };
+    if ((disabled && !oneShot) || !config) return { action: "continue" as const };
     if (config.strategy === "proxy") return { action: "continue" as const };
 
     try {
@@ -164,6 +187,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         includeAssistantTurns: config.classifierContextIncludeAssistantTurns,
       });
 
+      applyingOwnModel = true;
       const result = await route({
         turn,
         config,
@@ -175,16 +199,26 @@ export default function autorouter(pi: ExtensionAPI): void {
         registry: ctx.modelRegistry as never,
         planModeActive,
         pin,
+        oneShot,
         callerSystemPrompt: undefined,
       });
 
+      applyingOwnModel = false;
       lastDecision = result.decision;
       if (result.pinToWrite) pin = result.pinToWrite;
+      if (result.consumedOneShot) {
+        state.nextModel = null;
+        persistState();
+        if (ctx.hasUI && !result.decision.chosenModel) {
+          ctx.ui.notify(`autoroute: ${result.decision.fellBackBecause ?? "one-shot override failed"}`, "error");
+        }
+      }
 
       pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, result.decision);
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
     } catch (err) {
       // Choosing a model is a routing decision; no failure in it may fail the user's turn.
+      applyingOwnModel = false;
       if (ctx.hasUI) {
         ctx.ui.setStatus(STATUS_KEY, `autoroute error: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -274,7 +308,18 @@ export default function autorouter(pi: ExtensionAPI): void {
   pi.registerCommand("autoroute", {
     description: "Show or control automatic model routing",
     getArgumentCompletions: (prefix: string) => {
-      const verbs = ["init", "on", "off", "pin", "unpin", "explain", "status"];
+      // `next` and `pin` both take a model, so complete against the catalogue once the
+      // verb is typed. Cached at session_start, since this callback gets no context.
+      const modelVerb = /^(next|pin)\s+(.*)$/.exec(prefix);
+      if (modelVerb) {
+        const [, verb = "", typed = ""] = modelVerb;
+        const matches = availableRefs
+          .filter((ref) => ref.includes(typed))
+          .slice(0, 25)
+          .map((ref) => ({ value: `${verb} ${ref}`, label: ref }));
+        return matches.length > 0 ? matches : null;
+      }
+      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "status"];
       const items = verbs.filter((v) => v.startsWith(prefix)).map((v) => ({ value: v, label: v }));
       return items.length > 0 ? items : null;
     },
@@ -286,9 +331,35 @@ export default function autorouter(pi: ExtensionAPI): void {
           await runInit(rest, ctx);
           return;
 
+        case "next": {
+          if (rest.length === 0) {
+            const had = state.nextModel;
+            state.nextModel = null;
+            persistState();
+            ctx.ui.notify(had ? `autoroute: cleared one-shot override (${had})` : "autoroute: no override set", "info");
+            return;
+          }
+          const target = rest.join(" ");
+          const ref = splitModelRef(target);
+          // Validate now rather than at the next prompt: a typo should fail while the user
+          // is still looking at the command, not silently route the prompt they cared about.
+          if (!ref || !ctx.modelRegistry.find(ref.provider, ref.modelId)) {
+            ctx.ui.notify(
+              `autoroute: "${target}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`,
+              "error",
+            );
+            return;
+          }
+          state.nextModel = target;
+          persistState();
+          ctx.ui.notify(`autoroute: next prompt only → ${target}`, "info");
+          return;
+        }
+
         case "on":
           state.disabled = false;
           state.pinnedModel = null;
+          state.nextModel = null;
           persistState();
           ctx.ui.notify("autoroute: on", "info");
           return;
