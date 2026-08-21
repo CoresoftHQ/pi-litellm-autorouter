@@ -8,7 +8,7 @@ solves "run an agent loop against any provider". This extension is the missing s
 routing engine to TypeScript and wires it to `pi.setModel()`, so routing happens in the agent — with pi's own
 model registry, credentials, and thinking levels — instead of behind a separate proxy hop.
 
-> **Status: working, unproven in anger.** The router is implemented and unit-tested (91 tests,
+> **Status: working, unproven in anger.** The router is implemented and unit-tested (132 tests,
 > `npm run check`), and the extension loads in pi 0.84.2. The blocking design question — whether
 > `pi.setModel()` affects the turn already in flight — is [verified: it does](docs/seam.md). What has *not*
 > happened is a real session with real credentials routing real work, so treat the defaults as untuned. See
@@ -34,6 +34,11 @@ model registry, credentials, and thinking levels — instead of behind a separat
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Configuration](#configuration)
+  - [Start here: `/autoroute init`](#start-here-autoroute-init)
+  - [The minimum that works](#the-minimum-that-works)
+  - [Tuning what lands where](#tuning-what-lands-where)
+  - [The LLM classifier](#the-llm-classifier)
+  - [Full key reference](#full-key-reference)
 - [Commands and flags](#commands-and-flags)
 - [Proxy mode](#proxy-mode)
 - [Design constraints](#design-constraints)
@@ -363,8 +368,8 @@ From a clone — the supported path today, since nothing is published to npm yet
 ```bash
 git clone https://github.com/CoresoftHQ/pi-litellm-autorouter
 cd pi-litellm-autorouter && npm install
-cp examples/autorouter.heuristic.json ~/.pi/agent/autorouter.json   # then edit the model names
 pi -e ./src/index.ts
+# then, inside pi:  /autoroute init
 ```
 
 Once it behaves, drop the `-e` by pointing `settings.json` at the clone so `/reload` works:
@@ -398,81 +403,233 @@ permissions.
 
 ## Configuration
 
-`~/.pi/agent/autorouter.json`, shallow-merged with `.pi/autorouter.json` (project wins). Key names track
-LiteLLM's `complexity_router_config` so a config ports between the two systems. Runnable versions of both
-examples below are in [`examples/`](examples/).
+### Start here: `/autoroute init`
 
-An invalid config never stops pi from starting: it disables routing, reports why, and `/autoroute` shows the
-error.
+You do not have to write the tier table by hand. `init` reads the models pi can actually reach, ranks them by
+price, and writes a config you can then edit:
 
-### Minimal
+```
+/autoroute init                 # write ~/.pi/agent/autorouter.json
+/autoroute init project         # write .pi/autorouter.json instead
+/autoroute init anthropic       # only consider one provider
+/autoroute init llm             # also configure the LLM classifier
+```
+
+It shows what it will write and asks before writing, and never overwrites an existing config without
+confirmation. The new config loads immediately — no restart. Typical output:
+
+```
+  SIMPLE     openai/gpt-5-nano                    ~$0.12/Mtok blended
+  MEDIUM     anthropic/claude-haiku-4-5           ~$1.80/Mtok blended
+  COMPLEX    openai/gpt-5                         ~$3.00/Mtok blended
+  REASONING  anthropic/claude-opus-5              ~$27.00/Mtok blended
+
+  · Tiers were assigned by price alone, which is a proxy for capability and not the same thing.
+```
+
+**Read that last line seriously.** Price is the only signal pi's catalogue offers. It correlates with
+capability but is not the same thing, and nothing in the catalogue knows which model is good at *your* work.
+The generated file is a starting point to edit, not a recommendation. What `init` genuinely saves you is
+looking up model identifiers and their rates.
+
+Details of the ranking, in case a pick surprises you: models are ordered by a blended
+`input × 0.8 + output × 0.2` price per million tokens — weighted towards input because an agent turn re-reads
+a large context and writes a few hundred tokens back, so the input rate is what moves the bill. Tiers are then
+spread evenly across that ordering. The top tier prefers the priciest model that supports extended thinking,
+and gets `thinkingLevel: "high"`. `defaultModel` is the cheapest candidate, since it is what a failed
+classification falls back to. If `--models` or `enabledModels` scopes the session, only those models are
+considered.
+
+### Where config lives
+
+`~/.pi/agent/autorouter.json` is the global config; `.pi/autorouter.json` in the project is shallow-merged
+over it, so a project can override individual keys — `tiers`, say — while inheriting the rest. Key names track
+LiteLLM's `complexity_router_config`, so a config moves between the two systems with only the model names
+changed. Runnable examples are in [`examples/`](examples/).
+
+An invalid config never stops pi from starting. It disables routing, reports the first error on startup, and
+`/autoroute` shows the full list.
+
+### The minimum that works
+
+Only `tiers` and `defaultModel` are required:
 
 ```json
 {
   "defaultModel": "anthropic/claude-haiku-4-5",
   "tiers": {
-    "SIMPLE":    "anthropic/claude-haiku-4-5",
-    "MEDIUM":    "anthropic/claude-sonnet-5",
-    "COMPLEX":   "anthropic/claude-sonnet-5",
+    "SIMPLE": "anthropic/claude-haiku-4-5",
+    "MEDIUM": "anthropic/claude-sonnet-5",
+    "COMPLEX": "anthropic/claude-sonnet-5",
     "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
   }
 }
 ```
 
-That's the heuristic classifier with upstream's default weights and boundaries.
+Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. Only the first `/` splits, so
+`openrouter/anthropic/claude-sonnet` works. A tier accepts a bare string, an object with a `thinkingLevel`, or
+a list of either — extra entries in a list act as fallbacks when the first has no credentials.
 
-### LLM classifier with the agentic rubric
+That config uses the heuristic classifier: local, sub-millisecond, no API calls. It is the default and the
+right place to start.
+
+### Tuning what lands where
+
+Run a while, then use `/autoroute explain` on a prompt that went to the wrong tier. It prints the
+per-dimension breakdown, which tells you *why* — and that determines which knob to reach for.
+
+**The tier boundaries** move where the cut points sit. Lower `simple_medium` to send more work up a tier,
+raise it to send more down:
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
-  "classifier_type": "llm",
-  "classifier_llm_config": {
+  "tierBoundaries": { "simple_medium": 0.15, "medium_complex": 0.35, "complex_reasoning": 0.60 }
+}
+```
+
+Those are the defaults, and the key names are canonical — they name the *gap between* two tiers, not a tier,
+and stay the same even if you rename tiers, so a decision log stays comparable.
+
+**Keyword rules** are the blunt instrument, and often the right one. They bypass scoring entirely:
+
+```json
+{
+  "keywordTierRules": [
+    { "keywords": ["migration", "schema change", "security review"], "tier": "REASONING" },
+    { "keywords": ["typo", "rename", "formatting"], "tier": "SIMPLE" }
+  ]
+}
+```
+
+When several rules match, the **highest** tier wins, so adding a rule can raise the answer but never quietly
+lower one an earlier rule already justified. Single-word keywords match on word boundaries (`api` does not
+match `capital`); multi-word phrases and CJK match as substrings. A rule whose keywords are all blank is
+rejected at load, because an empty keyword substring-matches every prompt.
+
+**Keyword lists** feed the scorer itself. Override any of `codeKeywords`, `reasoningKeywords`,
+`technicalKeywords`, `simpleKeywords` to replace the default list wholesale — useful when your domain
+vocabulary is not the default's. **Dimension weights** (`dimensionWeights`) are the last resort; they are
+calibrated upstream and changing one moves every decision.
+
+### The LLM classifier
+
+Instead of scoring locally, ask a small model:
+
+```json
+{
+  "classifierType": "llm",
+  "classifierLLMConfig": {
     "model": "anthropic/claude-haiku-4-5",
-    "classification_rubric": "agentic",
-    "timeout_ms": 3000
+    "classificationRubric": "agentic",
+    "timeoutMs": 3000
   },
-  "classifier_fallback": "heuristic",
-  "classifier_context_window_size": 3,
-  "classifier_context_per_turn_chars": 200,
-  "tiers": { "...": "..." }
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3
 }
 ```
 
-`classification_rubric` defaults to `agentic` here, not `legacy` — upstream defaults to `legacy` only to avoid
-moving existing deployments' spend on upgrade, which is not a constraint a new project has.
+`classificationRubric` picks the calibration: **`agentic`** (the default here — anchors routine installs,
+builds, multi-file edits and standard debugging at `MEDIUM`), `chat`, `business`, or `legacy`. Pick the one
+matching your traffic; `agentic` is right for almost anyone using this.
 
-### Full surface
+`classifierContextWindowSize` is how many prior turns the classifier sees, which is what lets a bare `"yes"`
+be rated on the work it approves rather than on the word. `classifierContextIncludeAssistantTurns` adds
+assistant replies — often where the difficulty actually sits in an agent session, but it shifts decisions, so
+it is off by default.
+
+**The trade-off is latency.** This is an extra round-trip before every turn starts. Behind a proxy that hides
+inside request latency; in a TUI you watch it. Use a fast model, keep `timeoutMs` tight, and keep
+`classifierFallback: "heuristic"` so a timeout degrades to local scoring instead of a wasted turn.
+
+`classifierLLMConfig.systemPrompt` replaces the built-in rubric entirely — including its prompt-injection
+defence, the paragraph telling the classifier that quoted caller text is material to judge and never
+instructions. Without it, a prompt can ask for the top tier and get it. If you replace the rubric, restate
+that yourself, and consider `classifierFallback: "default_model"` since the heuristic fallback still scores
+*complexity* and will not match a different taxonomy.
+
+### Escape hatches for the user
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
-  "tiers": {
-    "SIMPLE":    "anthropic/claude-haiku-4-5",
-    "MEDIUM":    ["anthropic/claude-sonnet-5", "openai/gpt-5-mini"],
-    "COMPLEX":   "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
-  },
-  "tier_boundaries": { "simple_medium": 0.15, "medium_complex": 0.35, "complex_reasoning": 0.60 },
-  "keyword_tier_rules": [
-    { "keywords": ["migration", "schema change", "security"], "tier": "REASONING" },
-    { "keywords": ["typo", "rename", "format"], "tier": "SIMPLE" }
-  ],
-  "semantic_keyword_matching": false,
-  "escalation_keywords": ["ESCALATE"],
-  "planMode": { "minTier": "COMPLEX" },
-  "adaptive": false,
-  "adaptive_weights": { "quality": 0.3, "cost": 0.7 },
-  "tier_distance_penalty": 0.5,
-  "adaptive_eligible": "all",
-  "sessionAffinity": { "enabled": false, "ttlSeconds": 3600 }
+  "escalationKeywords": ["PI ESCALATE"],
+  "planMode": { "minTier": "COMPLEX" }
 }
 ```
+
+`escalationKeywords` are case-sensitive phrases that bump the result exactly one tier. Users can force a
+stronger model, never choose which one — which is the whole point: it is a sanctioned nudge, not a way to pin
+yourself to the most expensive model.
+
+`planMode.minTier` sets a tier *floor* while planning. Since pi has no built-in plan mode, a plan-mode
+extension announces itself on the shared bus:
+
+```typescript
+pi.events.emit("autoroute:plan-mode", { active: true });
+```
+
+`planMode.patterns` adds text sentinels as a fallback. Both are floors and never ceilings: a classified tier
+higher than the floor still wins, and a pasted sentinel can spend up to that tier but never outside your
+configured models.
+
+### Session affinity, and the cost question worth thinking about
+
+```json
+{ "sessionAffinity": { "enabled": false, "ttlSeconds": 3600 } }
+```
+
+With affinity on, the model chosen on the session's first turn is reused for the whole session and later turns
+skip classification. Off — the default — every turn is classified on its own merits.
+
+This is the real trade-off in the whole design, and it is not settled. Routing per prompt saves money on model
+choice and loses money on prompt-cache misses, because switching models discards the provider's cache. In a
+long agent session, cache hits can dominate the bill. Nobody has measured which way it nets out here; the
+default matches upstream's, which was tuned for proxy traffic rather than long agent sessions. If your
+sessions are long and your prompts are large, try turning it on.
+
+### Harness noise
+
+If something injects context into your conversation with delimiters other than `<system-reminder>`:
+
+```json
+{ "reminderMarkers": [{ "open": "<<<CTX>>>", "close": "<<<END>>>" }] }
+```
+
+Those blocks are stripped before classification, so injected plumbing does not decide which model serves the
+turn. Setting this **replaces** the built-in pair rather than adding to it — list `<system-reminder>` too if
+you still emit it.
+
+### Full key reference
+
+| Key | Default | What it does |
+|---|---|---|
+| `defaultModel` | — | Fallback when classification fails or a tier has nothing usable |
+| `tiers` | — | Tier → model, object, or list of either |
+| `enabled` | `true` | Set `false` to disable without deleting the file |
+| `strategy` | `"local"` | `"local"` or `"proxy"` |
+| `tierBoundaries` | `0.15 / 0.35 / 0.60` | Score cut points between tiers |
+| `tokenThresholds` | `{simple: 15, complex: 400}` | Short/long prompt boundaries |
+| `dimensionWeights` | upstream's seven | Per-dimension weights for the scorer |
+| `reasoningOverrideMinScore` | tracks `simple_medium` | Floor a reasoning-marker promotion must clear; `0` promotes on markers alone |
+| `codeKeywords` etc. | upstream's lists | Replace a scorer keyword list wholesale |
+| `classifierType` | `"heuristic"` | `"heuristic"` or `"llm"` |
+| `classifierLLMConfig` | — | `{ model, classificationRubric, timeoutMs, systemPrompt? }` |
+| `classifierFallback` | `"heuristic"` | What happens when the LLM classifier fails |
+| `classifierContextWindowSize` | `3` | Prior turns the classifier sees |
+| `classifierContextPerTurnChars` | `200` | Truncation per quoted turn |
+| `classifierContextIncludeAssistantTurns` | `false` | Include assistant replies as context |
+| `keywordTierRules` | `[]` | `[{ keywords, tier }]`, highest match wins |
+| `escalationKeywords` | `["PI ESCALATE"]` | Case-sensitive; bumps one tier |
+| `planMode.minTier` | — | Tier floor while plan mode is active |
+| `planMode.patterns` | `[]` | Extra text sentinels for plan mode |
+| `sessionAffinity` | `false` | Pin the first turn's model for the session |
+| `reminderMarkers` | `<system-reminder>` | Delimiter pairs stripped before classification |
+| `proxy` | — | `{ baseUrl, model, apiKey? }` for proxy mode |
 
 ## Commands and flags
 
 | | Purpose |
 |---|---|
+| `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach |
 | `/autoroute` | Current classifier, last decision, tier, and score |
 | `/autoroute off` / `on` | Toggle routing for the session |
 | `/autoroute pin <model>` | Freeze on one model until unpinned |

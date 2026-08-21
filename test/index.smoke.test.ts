@@ -8,7 +8,7 @@
  * ExtensionAPI.
  */
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -64,14 +64,23 @@ function mockPi() {
   return { pi, fire, emit, commands, entries, setModelCalls, thinkingCalls, flags, handlers };
 }
 
+const CATALOGUE = [
+  { provider: "openai", id: "gpt-mini", cost: { input: 0.15, output: 0.6 }, input: ["text"] },
+  { provider: "anthropic", id: "haiku", cost: { input: 0.8, output: 4 }, input: ["text"] },
+  { provider: "anthropic", id: "sonnet", cost: { input: 3, output: 15 }, input: ["text"] },
+  { provider: "anthropic", id: "opus", cost: { input: 15, output: 75 }, input: ["text"], reasoning: true },
+];
+
 function mockCtx(cwd: string, overrides: Record<string, unknown> = {}) {
   return {
     cwd,
     hasUI: true,
-    ui: { notify: vi.fn(), setStatus: vi.fn() },
+    ui: { notify: vi.fn(), setStatus: vi.fn(), confirm: vi.fn(async () => true) },
     sessionManager: { getBranch: () => [], getEntries: () => [], getSessionFile: () => "/tmp/session.jsonl" },
+    scopedModels: [],
     modelRegistry: {
       find: (provider: string, modelId: string) => ({ provider, id: modelId }),
+      getAvailable: () => CATALOGUE,
       complete: vi.fn(),
     },
     model: undefined,
@@ -279,6 +288,87 @@ describe("extension wiring", () => {
     expect(m.setModelCalls).toEqual(["anthropic/sonnet"]);
     const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
     expect(decision.planFloored).toBe(true);
+  });
+
+  it("writes a config from the available models and routes with it immediately", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "autoroute-init-"));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(fresh);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    // No config yet, so nothing routes.
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    expect(m.setModelCalls).toEqual([]);
+
+    await m.commands.get("autoroute")!.handler("init project", ctx);
+
+    const written = JSON.parse(readFileSync(join(fresh, ".pi", "autorouter.json"), "utf8"));
+    expect(written.defaultModel).toBe("openai/gpt-mini");
+    expect(written.tiers.REASONING).toEqual({ model: "anthropic/opus", thinkingLevel: "high" });
+
+    // The new config takes effect without a restart.
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    expect(m.setModelCalls).toEqual(["openai/gpt-mini"]);
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("does not overwrite an existing config when the user declines", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, {
+      ui: { notify: vi.fn(), setStatus: vi.fn(), confirm: vi.fn(async () => false) },
+    });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("init project", ctx);
+
+    const onDisk = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
+    expect(onDisk).toEqual(CONFIG);
+    expect(ctx.ui.confirm).toHaveBeenCalled();
+  });
+
+  it("refuses to overwrite with no UI to confirm through", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, { hasUI: false });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("init project", ctx);
+
+    expect(JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"))).toEqual(CONFIG);
+  });
+
+  it("reports a provider filter that matches nothing instead of writing", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "autoroute-init-"));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(fresh);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("init nosuchprovider project", ctx);
+
+    expect(existsSync(join(fresh, ".pi", "autorouter.json"))).toBe(false);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("no usable models"), "error");
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("prefers session-scoped models over the whole catalogue", async () => {
+    // `--models` / `enabledModels` is the set the user intends to use.
+    const fresh = mkdtempSync(join(tmpdir(), "autoroute-init-"));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(fresh, {
+      scopedModels: [{ model: CATALOGUE[1] }, { model: CATALOGUE[2] }],
+    });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("init project", ctx);
+
+    const written = JSON.parse(readFileSync(join(fresh, ".pi", "autorouter.json"), "utf8"));
+    expect(written.defaultModel).toBe("anthropic/haiku");
+    expect(JSON.stringify(written)).not.toContain("gpt-mini");
+    rmSync(fresh, { recursive: true, force: true });
   });
 
   it("stops flooring once plan mode ends", async () => {

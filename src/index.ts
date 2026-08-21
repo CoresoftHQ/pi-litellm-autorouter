@@ -9,6 +9,9 @@
  * which the model for the turn about to run can still be changed.
  */
 
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type RouterConfig, loadConfig } from "./config.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
@@ -20,6 +23,7 @@ import {
   statusLine,
 } from "./decision.ts";
 import { extractTurn, type SimpleMessage } from "./extract.ts";
+import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
 import { type SessionPin, route } from "./router.ts";
 import type { RouteDecision } from "./types.ts";
 
@@ -189,10 +193,88 @@ export default function autorouter(pi: ExtensionAPI): void {
     return { action: "continue" as const };
   });
 
+  /**
+   * Write a starting config built from the models pi can reach.
+   *
+   * Never silently overwrites: an existing file needs confirmation, and there is no
+   * confirmation to give in a non-interactive run, so it refuses instead.
+   */
+  const runInit = async (rest: string[], ctx: ExtensionContext): Promise<void> => {
+    const toProject = rest.includes("project");
+    const useLLM = rest.includes("llm");
+    const provider = rest.find((token) => !["project", "global", "llm", "heuristic"].includes(token));
+
+    // Session scoping (`--models` / `enabledModels`) is the set the user actually intends
+    // to use, so it wins over the full catalogue when it is set.
+    const scoped = ctx.scopedModels ?? [];
+    const source: CandidateModel[] =
+      scoped.length > 0
+        ? scoped.map((entry) => entry.model as unknown as CandidateModel)
+        : (ctx.modelRegistry.getAvailable() as unknown as CandidateModel[]);
+
+    let result;
+    try {
+      result = buildInitialConfig(source, {
+        ...(provider ? { provider } : {}),
+        classifier: useLLM ? "llm" : "heuristic",
+      });
+    } catch (err) {
+      ctx.ui.notify(`autoroute init: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+
+    const target = toProject
+      ? join(ctx.cwd, ".pi", "autorouter.json")
+      : join(homedir(), ".pi", "agent", "autorouter.json");
+
+    const preview = [
+      `autoroute init — ${scoped.length > 0 ? "session-scoped models" : "all available models"}`,
+      "",
+      renderInitPreview(result),
+      "",
+      `  → ${target}`,
+    ].join("\n");
+
+    if (existsSync(target)) {
+      if (!ctx.hasUI) {
+        ctx.ui.notify(`autoroute init: ${target} already exists (no UI available to confirm)`, "error");
+        return;
+      }
+      const ok = await ctx.ui.confirm("Overwrite existing autoroute config?", `${target}\n\n${preview}`);
+      if (!ok) {
+        ctx.ui.notify("autoroute init: cancelled", "info");
+        return;
+      }
+    } else if (ctx.hasUI) {
+      const ok = await ctx.ui.confirm("Write this autoroute config?", preview);
+      if (!ok) {
+        ctx.ui.notify("autoroute init: cancelled", "info");
+        return;
+      }
+    }
+
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
+    } catch (err) {
+      ctx.ui.notify(`autoroute init: could not write ${target}: ${err instanceof Error ? err.message : err}`, "error");
+      return;
+    }
+
+    // Load it straight away so the session routes without a restart.
+    const loaded = loadConfig(ctx.cwd);
+    config = loaded.config;
+    configWarnings = loaded.warnings;
+    configErrors = loaded.errors;
+    configSources = loaded.sources;
+
+    ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
+  };
+
   pi.registerCommand("autoroute", {
     description: "Show or control automatic model routing",
     getArgumentCompletions: (prefix: string) => {
-      const verbs = ["on", "off", "pin", "unpin", "explain", "status"];
+      const verbs = ["init", "on", "off", "pin", "unpin", "explain", "status"];
       const items = verbs.filter((v) => v.startsWith(prefix)).map((v) => ({ value: v, label: v }));
       return items.length > 0 ? items : null;
     },
@@ -200,6 +282,10 @@ export default function autorouter(pi: ExtensionAPI): void {
       const [verb = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
       switch (verb) {
+        case "init":
+          await runInit(rest, ctx);
+          return;
+
         case "on":
           state.disabled = false;
           state.pinnedModel = null;

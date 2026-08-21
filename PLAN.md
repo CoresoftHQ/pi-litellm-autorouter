@@ -135,6 +135,22 @@ Deferred deliberately: each is only worth it once the base router is proven.
       embeddings at load; cache prompt embeddings by hash. This is v2's semantic path — resolving to a *tier*,
       not straight to a model.
 
+## Phase 8a — Config ergonomics ✅ DONE
+
+- [x] `/autoroute init` builds a config from `modelRegistry.getAvailable()` (or `ctx.scopedModels` when the
+      session is scoped), ranking by a blended `input × 0.8 + output × 0.2` price per million tokens — weighted
+      to input because that is what an agent turn is made of.
+- [x] Top tier prefers the priciest model that supports extended thinking, and gets `thinkingLevel: "high"`.
+      A *cheap* reasoning model must not be promoted past the price ordering; tested.
+- [x] Degenerate catalogues (one model, no cost data, provider filter matching nothing) produce a usable
+      config plus a note saying what was compromised, or a clear error.
+- [x] Deterministic: same catalogue in any order produces the same file.
+- [x] Never overwrites without confirmation, and refuses when there is no UI to confirm through.
+- [x] Generated configs are round-tripped through the loader in tests, so `init` cannot emit something
+      `loadConfig` would reject.
+- [x] README configuration guide: init, layering, tuning by `/autoroute explain`, the LLM classifier and its
+      latency trade-off, escape hatches, affinity, and a full key reference table.
+
 ## Phase 8 — Proxy mode, polish, release
 
 - [ ] `src/proxy.ts`: `pi.registerProvider()` for a LiteLLM proxy; local classification disabled entirely.
