@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
       publish: ${{ steps.check.outputs.publish }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - id: check
         name: Compare package.json against the registry
@@ -53,14 +53,14 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: npm
+          package-manager-cache: false
           registry-url: "https://registry.npmjs.org"
 
       - run: npm ci
