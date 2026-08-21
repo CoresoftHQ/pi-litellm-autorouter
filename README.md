@@ -386,6 +386,12 @@ npm run check      # tsc --noEmit && vitest run
 npm test           # vitest run
 ```
 
+> **If routing silently stops happening, suspect a load failure.** pi ignores a broken
+> extension without saying so: a factory that throws, or a file that is not valid TypeScript, still leaves
+> `pi` exiting 0 with nothing on stdout or stderr, every model listed, and the agent working normally — just
+> with no router attached. There is no error to grep for. Run `npm run check` against your checkout to find
+> out whether the extension is loadable, because pi will not tell you.
+
 Extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) are auto-discovered and
 hot-reloadable with `/reload`; `pi -e` is for quick tests. Note that extensions run with your full system
 permissions.
