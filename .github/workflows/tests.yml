@@ -1,14 +1,11 @@
-name: CI
+name: Tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
-# A newer push makes an in-flight run for the same branch pointless.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,31 +13,4 @@ permissions:
 
 jobs:
   check:
-    name: typecheck + tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          # pi declares engines.node >=22.19.0, so 22 is the floor this extension has to
-          # work on. Testing above the floor would not tell us the floor still works.
-          node-version: "22"
-          cache: npm
-
-      - run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Tests
-        run: npm test
-
-# Deliberately not here: a `pi -e ./src/index.ts` smoke step. It looks like a load check
-# and is not one — pi exits 0 with no output on stdout or stderr even when an extension's
-# factory throws or the file is not valid TypeScript, and still lists every model. A step
-# built on it would pass a completely broken extension.
-#
-# `test/index.smoke.test.ts` is the real check: it imports src/index.ts, drives it with a
-# mock ExtensionAPI, and asserts the registrations and the routing path. That fails loudly
-# for exactly the breakage the CLI swallows.
+    uses: ./.github/workflows/checks.yml
