@@ -8,9 +8,11 @@ solves "run an agent loop against any provider". This extension is the missing s
 routing engine to TypeScript and wires it to `pi.setModel()`, so routing happens in the agent — with pi's own
 model registry, credentials, and thinking levels — instead of behind a separate proxy hop.
 
-> **Status: design stage.** This repository currently contains the specification (this file) and the
-> implementation plan ([`PLAN.md`](PLAN.md)). No extension code has been written yet. Everything below marked
-> "planned" describes the intended behaviour, not shipped behaviour.
+> **Status: working, unproven in anger.** The router is implemented and unit-tested (91 tests,
+> `npm run check`), and the extension loads in pi 0.84.2. The blocking design question — whether
+> `pi.setModel()` affects the turn already in flight — is [verified: it does](docs/seam.md). What has *not*
+> happened is a real session with real credentials routing real work, so treat the defaults as untuned. See
+> [what is not yet verified](#what-is-not-yet-verified).
 
 > **v2 only.** This port targets LiteLLM's v2 auto-router (`auto_router/complexity_router`). The v1 semantic
 > auto-router is deprecated upstream and is **not** ported — see [What we deliberately don't
@@ -35,6 +37,7 @@ model registry, credentials, and thinking levels — instead of behind a separat
 - [Commands and flags](#commands-and-flags)
 - [Proxy mode](#proxy-mode)
 - [Design constraints](#design-constraints)
+- [What is not yet verified](#what-is-not-yet-verified)
 - [Prior art and attribution](#prior-art-and-attribution)
 
 ---
@@ -104,7 +107,13 @@ Three classifier types (`classifier_type`):
 The weighted sum maps to tiers on `tier_boundaries`: `simple_medium` 0.15, `medium_complex` 0.35,
 `complex_reasoning` 0.60. Two or more reasoning markers promote to `REASONING`, but only if the score also
 clears `reasoning_override_min_score` (which tracks `simple_medium` unless set) — so stock phrases on a trivial
-prompt can't buy the top tier. Reasoning markers *in the system prompt* never trigger the promotion.
+prompt can't buy the top tier.
+
+The system prompt is not scored **at all** — not merely excluded from the reasoning override. It is a
+per-session constant, so it carries no information about how requests *within* a session differ, while
+saturating the keyword thresholds: `codePresence` trips at two matches, which any agent identity prompt clears
+on its first line, and it would spend 0.63 of the weight budget doing it. That collapses the scorer's dynamic
+range and escalates every request alike.
 
 **`llm`** — a small model classifies the prompt against a rubric and returns a tier via structured output
 (`classifier_llm_config.model`, `timeout_ms` default 3000). This is where v2's most useful feature for us
@@ -251,8 +260,8 @@ It re-implements the v2 routing *decision* in TypeScript and applies it through 
 | `default_model` | `defaultModel`; also the fallback on any router error |
 | Model catalogue (`model_list`) | pi's model registry, narrowed by `ctx.scopedModels` |
 | `classifier_llm_config.model` | a pi registry model, using credentials pi already resolved |
-| `session_affinity` / session id | the pi session — `ctx.sessionManager.getSessionFile()` |
-| `plan_mode_min_tier` sentinels | pi's own plan mode, read directly instead of sniffed from prompt text |
+| `session_affinity` / session id | the pi session, with the pin held in extension state |
+| `plan_mode_min_tier` sentinels | an `autoroute:plan-mode` event on pi's shared bus, plus text patterns |
 | `reminder_markers` | pi's `<system-reminder>` context injections |
 | `escalation_keywords` | both the keyword and an `/autoroute escalate` command |
 | Spend logs / `routing_decision` | `pi.appendEntry("autoroute-decision", …)` + `ctx.ui.setStatus()` |
@@ -268,9 +277,19 @@ Planned behaviour per prompt:
    (`pi.setModel()` returns `false`), fall to the next candidate, then `defaultModel`.
 7. `pi.setModel()` and optionally `pi.setThinkingLevel()` applied; decision recorded; turn proceeds.
 
-**Sentinel detection is where pi beats the proxy.** Upstream has to sniff plan mode out of client-injected
-prompt text — brittle strings that drift with every client release, and spoofable by anyone who pastes one.
-In-process, pi's plan mode is a fact we can read directly. Same for the session id and the reminder markers.
+**On plan mode.** An earlier draft of this README claimed pi's plan mode was a fact we could read directly,
+which would have been a clean win over upstream's sniffing of client-injected prompt text. That was wrong: pi
+has no built-in plan mode — it ships as an example extension, so there is no native state to query. What the
+extension does instead is offer an integration contract. A plan-mode extension announces itself on pi's shared
+event bus:
+
+```typescript
+pi.events.emit("autoroute:plan-mode", { active: true });
+```
+
+and the router treats that as a tier floor. Failing that, `planMode.patterns` still matches sentinels carried
+in prompt text — the only mechanism the proxy has, and spoofable by anyone who pastes one, which is why the
+floor can raise a tier but never lower it.
 
 ### What it deliberately does not do
 
@@ -339,22 +358,32 @@ pi-litellm-autorouter/
 
 ## Installation
 
-*(planned)*
-
-As a pi package, via `settings.json`:
-
-```json
-{
-  "packages": ["npm:@coresoft/pi-litellm-autorouter@1"]
-}
-```
-
-Or from a clone, for development:
+From a clone — the supported path today, since nothing is published to npm yet:
 
 ```bash
 git clone https://github.com/CoresoftHQ/pi-litellm-autorouter
 cd pi-litellm-autorouter && npm install
+cp examples/autorouter.heuristic.json ~/.pi/agent/autorouter.json   # then edit the model names
 pi -e ./src/index.ts
+```
+
+Once it behaves, drop the `-e` by pointing `settings.json` at the clone so `/reload` works:
+
+```json
+{
+  "extensions": ["/path/to/pi-litellm-autorouter/src/index.ts"]
+}
+```
+
+Extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) are auto-discovered and
+hot-reloadable with `/reload`; `pi -e` is for quick tests. Note that extensions run with your full system
+permissions.
+
+Development:
+
+```bash
+npm run check      # tsc --noEmit && vitest run
+npm test           # vitest run
 ```
 
 Extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) are auto-discovered and
@@ -363,8 +392,12 @@ permissions.
 
 ## Configuration
 
-*(planned)* — `~/.pi/agent/autorouter.json`, overridable per project at `.pi/autorouter.json`. Key names track
-LiteLLM's `complexity_router_config` so a config ports between the two systems.
+`~/.pi/agent/autorouter.json`, shallow-merged with `.pi/autorouter.json` (project wins). Key names track
+LiteLLM's `complexity_router_config` so a config ports between the two systems. Runnable versions of both
+examples below are in [`examples/`](examples/).
+
+An invalid config never stops pi from starting: it disables routing, reports why, and `/autoroute` shows the
+error.
 
 ### Minimal
 
@@ -432,8 +465,6 @@ moving existing deployments' spend on upgrade, which is not a constraint a new p
 
 ## Commands and flags
 
-*(planned)*
-
 | | Purpose |
 |---|---|
 | `/autoroute` | Current classifier, last decision, tier, and score |
@@ -481,6 +512,30 @@ one logical model. The chosen model is only visible in response headers, which t
 6. **The trust boundary is not optional.** Prompt text is material to classify, never instructions. Escalation
    is the one sanctioned caller influence, and it moves exactly one tier.
 7. **One model per agent run.** See [what it does not do](#what-it-deliberately-does-not-do).
+
+## What is not yet verified
+
+Being precise about where the line falls, because "91 tests pass" and "this works" are different claims.
+
+**Verified.** The routing engine — extraction, scoring, precedence, resolution, fallback — is unit-tested
+against 91 cases, including every failure mode. The extension loads in pi 0.84.2, `registerFlag` takes effect,
+and [`pi.setModel()` demonstrably changes the model for the turn already in flight](docs/seam.md), with pi
+awaiting the `input` handler so an async classifier can run there.
+
+**Not verified.** Everything that needs a real session with real credentials:
+
+- **Multi-turn routing.** The seam test covered one turn in print mode. Whether turn *N* reliably gets turn
+  *N*'s classification across a long session is untested.
+- **The LLM classifier end to end.** `ctx.modelRegistry.complete()` from inside an `input` handler is typed to
+  work and has never been called for real.
+- **Latency.** No measurement exists. The heuristic classifier stays the default until there is one.
+- **Whether any of the defaults are right.** The weights and boundaries are upstream's, calibrated for proxy
+  traffic. The `agentic` rubric is calibrated for agent traffic but by upstream, not against this router.
+- **The streaming guard.** Routing is skipped when `event.streamingBehavior` is set, on the assumption that
+  switching models mid-run breaks provider message shapes. Possibly over-cautious.
+- **Cache economics.** The central open question: per-prompt routing saves on model choice and loses on prompt
+  cache misses. `sessionAffinity` exists to trade one against the other; which default is right is a
+  measurement nobody has taken.
 
 ## Prior art and attribution
 

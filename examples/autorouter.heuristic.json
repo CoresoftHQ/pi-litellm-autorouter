@@ -1,0 +1,16 @@
+{
+  "defaultModel": "anthropic/claude-haiku-4-5",
+  "tiers": {
+    "SIMPLE": "anthropic/claude-haiku-4-5",
+    "MEDIUM": "anthropic/claude-sonnet-5",
+    "COMPLEX": "anthropic/claude-sonnet-5",
+    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+  },
+  "keywordTierRules": [
+    { "keywords": ["migration", "schema change", "security review"], "tier": "REASONING" },
+    { "keywords": ["typo", "rename", "formatting"], "tier": "SIMPLE" }
+  ],
+  "escalationKeywords": ["PI ESCALATE"],
+  "planMode": { "minTier": "COMPLEX" },
+  "sessionAffinity": { "enabled": false, "ttlSeconds": 3600 }
+}

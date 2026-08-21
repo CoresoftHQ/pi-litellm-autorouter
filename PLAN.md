@@ -12,155 +12,109 @@ escalation, plan-mode floors, affinity. Adaptive sampling and semantic keyword m
 
 ---
 
-## Phase 0 — Verify the seam (blocking, ~half a day)
+## Phase 0 — Verify the seam ✅ DONE
 
-Everything downstream depends on one question the pi docs do not answer outright:
+> **Answered: yes.** `pi.setModel()` inside the `input` handler changes the model for the turn already in
+> flight, and pi awaits the handler, so an async classifier can run there. Evidence and the exact trace are in
+> [`docs/seam.md`](docs/seam.md); the probe is `test/manual/seam-probe.ts`.
 
-> **Does `pi.setModel()` affect the turn that is already in flight?**
+Remaining from this phase, needing an interactive session with credentials:
 
-The `input` event fires before agent processing begins, and `before_agent_start` fires after the prompt is
-submitted but before the agent loop. It is not documented whether a model set inside either handler is picked
-up by the run that follows, or only by the next one. If it's the latter, routing is always one prompt behind
-and the design changes materially.
+- [ ] Multi-turn: confirm turn *N* gets turn *N*'s classification across a long session (the probe alternates
+      targets per turn and is ready for this).
+- [ ] `streamingBehavior` `"steer"` / `"followUp"`: routing is currently skipped there on the assumption that
+      switching models mid-run is unsafe. Possibly over-cautious.
+- [ ] Confirm `pi.setThinkingLevel()` clamps against the model set moments earlier in the same handler.
 
-- [ ] Spike an extension that sets a distinct model in `input` and logs `ctx.model` from `turn_start` and
-      `before_provider_request`. Confirm which handler wins.
-- [ ] Confirm `await pi.setModel(m)` resolves before the agent starts, and that an `input` handler can hold up
-      the turn while an async classifier runs (this gates the LLM classifier entirely).
-- [ ] Confirm behaviour under `streamingBehavior: "steer"` and `"followUp"` — a queued follow-up may arrive
-      mid-run, where switching models is not safe.
-- [ ] Confirm `ctx.modelRegistry.find(provider, id)` accepts the ids in pi's catalogue; check
-      `getAvailable()` / `ctx.scopedModels` for candidate filtering.
-- [ ] Confirm `pi.setThinkingLevel()` clamping happens against the *new* model, i.e. call it after
-      `setModel()`.
+## Phase 1 — Skeleton, config, and extraction ✅ DONE
 
-**Exit criteria:** a one-file spike that provably routes prompt N to model N, not N+1. Record the answer in
-`docs/seam.md`. If neither handler can change the current turn, escalate before building further.
+- [x] `package.json` with `"pi": { "extensions": ["./src/index.ts"] }`; deps in `dependencies`, not
+      `devDependencies`, since pi package installs are production-only.
+- [x] TypeScript + vitest; `tsc --noEmit` clean. No build step — pi loads TS via jiti.
+- [x] `src/config.ts`: global + project layers, full defaulting, never crashes startup. Upstream's
+      load-bearing validations are carried over: blank keywords rejected, `classificationRubric` and
+      `systemPrompt` mutually exclusive, blank `systemPrompt` rejected.
+- [x] `src/index.ts`: factory registers flag and commands only; classifier construction deferred to
+      `session_start`.
+- [x] `src/extract.ts`: reminder-block stripping (unclosed delimiters left alone, nested/overlapping pairs cut
+      whole), fallback to the last real ask, prior-turn window with truncation.
+- [x] `src/decision.ts`: `RouteDecision` with upstream's cause vocabulary, persisted via `appendEntry`,
+      rendered to the footer.
 
-## Phase 1 — Skeleton, config, and extraction
+## Phase 2 — Resolver and safety rails ✅ DONE
 
-- [ ] `package.json` with `"pi": { "extensions": ["./src/index.ts"] }`, runtime deps in `dependencies` (not
-      `devDependencies` — pi package installs are production-only). `typebox` for schemas.
-- [ ] TypeScript + vitest + lint. No build step (pi loads TS via jiti), but keep `tsc --noEmit` in CI.
-- [ ] `src/config.ts`: load `~/.pi/agent/autorouter.json`, merge `.pi/autorouter.json` over it, validate,
-      return a fully-defaulted config. Invalid config = loud warning + routing disabled, never a startup crash.
-      Mirror upstream's validation rules, including the ones that exist for a reason: reject blank keywords in
-      `keyword_tier_rules` (a blank substring-matches every prompt and would silently force one tier for all
-      traffic), and reject `classification_rubric` alongside a custom `system_prompt` (mutually exclusive
-      upstream, since the custom prompt replaces the rubric the preset would select).
-- [ ] `src/index.ts`: default export factory. Register flag and commands there; start no background work (the
-      factory runs in invocations that never open a session). Defer classifier construction to `session_start`.
-- [ ] `src/extract.ts` — the input hygiene layer, ported from upstream's `_strip_reminder_blocks`,
-      `_extract_current_ask_and_system_prompt`, `_newest_turn_ask`, `_extract_prior_turns`:
-  - [ ] Strip complete reminder blocks (default `<system-reminder>`/`</system-reminder>`, case-insensitive).
-        Nested/overlapping blocks strip whole; an *unclosed* delimiter is not a block and stays, so prose that
-        merely mentions a delimiter isn't eaten.
-  - [ ] A turn that strips to empty falls back to the last real ask.
-  - [ ] Prior-turn context: last N turns, truncated to `classifier_context_per_turn_chars`.
-  - [ ] Configurable marker pairs, *replacing* the built-in pair rather than adding to it.
-- [ ] `src/decision.ts`: the `RouteDecision` record — `{ cause, tier, score, signals, matchedKeyword,
-      escalationKeyword, escalated, chosenModel, latencyMs }`, mirroring upstream's `routing_decision` causes
-      (`plan_mode`, `literal_keyword_match`, `semantic_keyword_match`, `session_affinity_pin`,
-      `session_affinity_escalation`, `default_fallback`, `default_model_fallback`). Persisted with
-      `pi.appendEntry()`, surfaced via `ctx.ui.setStatus()`.
+- [x] `src/resolve.ts`: first usable candidate wins; `setModel() === false` (no API key) demotes rather than
+      fails.
+- [x] Fallback chain walks *down* the tiers, then `defaultModel`, then leaves the model untouched. Walking
+      down is deliberate: serving a request from a cheaper model is a degradation, silently promoting it is a
+      bill the user did not ask for.
+- [x] Escape hatches before classification: `--no-autoroute`, `/autoroute off`, a hand-picked model (tracked
+      via `model_select` with `source === "set"`), and `/autoroute pin`.
+- [x] State restored from `appendEntry` records on `session_start`.
+- [x] Tests: every failure mode returns a usable model or leaves the session alone; none throws.
 
-**Exit criteria:** extension loads, `/autoroute` reports its config, extraction is unit-tested against
-pi-shaped transcripts including reminder blocks.
+## Phase 3 — Heuristic classifier ✅ DONE
 
-## Phase 2 — Resolver and safety rails
+- [x] Seven scorers with upstream weights, boundaries, token thresholds and keyword lists, ported verbatim.
+- [x] Reasoning override: 2+ markers, gated on `reasoningOverrideMinScore` (tracks `simple_medium`).
+- [x] System prompt not scored at all, per upstream's reasoning about dynamic range.
+- [x] Word-boundary matching with the CJK carve-out.
+- [x] Per-tier `{ model, thinkingLevel }` and bare strings both accepted.
+- [x] `/autoroute explain` renders the per-dimension breakdown.
 
-Bulletproof first; every classifier plugs into this.
+Deferred: **calibration against real traffic**. The scorer is faithful to upstream, which is not the same as
+correct for this router. One quirk already found and pinned in tests: `\blet\b` matches the "let" in "let's",
+so "let's think about it" scores `codePresence` — enough on its own to push a short prompt over the
+reasoning-override floor.
 
-- [ ] `src/resolve.ts`: given an ordered candidate list, return the first that exists in the registry **and**
-      for which `pi.setModel()` succeeds. A `false` return (no API key) demotes rather than fails.
-- [ ] Fallback chain: `tier pick → tier fallback → defaultModel → leave model unchanged`. Never throw out of
-      the handler.
-- [ ] Escape hatches, before any classification: session pin, `--no-autoroute`, `/autoroute off`, and "user
-      changed model by hand" — track via `model_select` with `event.source === "set"` and suppress until
-      unpinned.
-- [ ] `session_start` restores pin/off state from prior `appendEntry` records.
-- [ ] Tests: every failure mode returns a usable model and logs; none throws.
+## Phase 4 — LLM classifier with the agentic rubric ✅ DONE (unproven)
 
-**Exit criteria:** a stub classifier that always names a nonexistent model still leaves the session usable.
+- [x] `src/classify/rubrics.ts`: tier criteria, preamble, calibration examples and trust boundary ported
+      verbatim. Presets `agentic` (default here), `chat`, `business`, `legacy`.
+- [x] Trust boundary appended unconditionally; a custom `systemPrompt` warns that it drops the injection
+      defence.
+- [x] Closing line switches on the context window.
+- [x] Runs through `ctx.modelRegistry.complete()`, reusing pi's resolved credentials — no second API key.
+- [x] Hard timeout via `AbortController`; on failure, `classifierFallback` decides.
+- [x] Tier parsing takes the *first* tier named, so trailing chatter cannot upgrade the answer.
 
-## Phase 3 — Heuristic classifier
+- [ ] **Never called against a live model.** Typed to work, untested end to end.
+- [ ] **Latency unmeasured.** Heuristic stays the default until p50/p95 exists.
+- [ ] Cache classifications by hash within a session.
 
-Port of upstream's `_score_and_classify`. This is the default path and must stay sub-millisecond.
+## Phase 5 — Overrides: keywords, escalation, plan mode ✅ DONE
 
-- [ ] Seven scorers with upstream weights: `codePresence` 0.30, `reasoningMarkers` 0.25, `technicalTerms` 0.25,
-      `tokenCount` 0.10, `simpleIndicators` 0.05 (negative), `multiStepPatterns` 0.03, `questionComplexity`
-      0.02.
-- [ ] Tier boundaries `simple_medium` 0.15, `medium_complex` 0.35, `complex_reasoning` 0.60; canonical key
-      names kept so configs port both ways.
-- [ ] Token thresholds (`simple` 15, `complex` 400), overridable keyword lists, word-boundary matching for
-      single-word keywords.
-- [ ] Reasoning override: 2+ markers promote to `REASONING`, gated on `reasoning_override_min_score` (tracks
-      `simple_medium` unless set). Markers in the **system prompt** must not trigger it.
-- [ ] `tier_labels` for display; config keys stay canonical.
-- [ ] Per-tier object form (`{ model, thinkingLevel }`) and bare strings both accepted.
-- [ ] `/autoroute explain` renders the per-dimension breakdown.
+Precedence matches upstream exactly; it is load-bearing, not incidental.
 
-**Exit criteria:** scoring matches a fixture set ported from upstream's tests; <1ms per classification.
-
-## Phase 4 — LLM classifier with the agentic rubric
-
-The reason to target v2 at all. Upstream's own analysis is that a chat-calibrated rubric puts non-trivial code
-at the top of the scale, which is the *median* agent request — so ordinary engineering routes to the most
-expensive tier. The `agentic` preset is the fix, and it is a measured artifact: the accuracy reported for a
-preset describes that exact text, so it must be ported byte-for-byte, not paraphrased.
-
-- [ ] `src/classify/rubrics.ts`: port the tier criteria, the preamble, the calibration example blocks, and the
-      trust-boundary paragraph verbatim. Presets: `agentic` (our default), `chat`, `business`, `legacy`.
-- [ ] Tier names render as placeholders so `tier_labels` substitute correctly and the enum the classifier may
-      return always matches the rubric's vocabulary.
-- [ ] Closing line switches on context window: with a window, "rate the work a short reply approves"; without,
-      "classify only the current message".
-- [ ] **Trust boundary appended unconditionally** after any operator preamble. A full `system_prompt`
-      replacement drops it — document that loudly and default `classifier_fallback` to `default_model` in that
-      case, per upstream.
-- [ ] Structured output for the tier; classifier model resolved from pi's registry using
-      `ctx.modelRegistry.getProviderAuth()`.
-- [ ] `timeout_ms` (default 3000) with a hard abort; on timeout or error, `classifier_fallback` decides
-      (`heuristic` re-scores locally, or `default_model`).
-- [ ] Cache decisions by hash of (extracted ask + context turns + rubric) within a session.
-- [ ] **Latency review before making this the default.** 3s is fine behind a proxy and long in a TUI. Measure
-      p50/p95 with a small model; if it's not comfortably sub-second, heuristic stays the default and this is
-      opt-in.
-
-**Exit criteria:** agentic-rubric classification reproduces upstream's worked examples; measured added latency
-documented in the README.
-
-## Phase 5 — Overrides: keywords, escalation, plan mode
-
-Precedence must match upstream exactly; it is load-bearing, not incidental.
-
-- [ ] `keyword_tier_rules`, lexical matching first. Multiple matches escalate to the **highest** tier, so rule
-      order never silently changes behaviour.
-- [ ] `escalation_keywords` (default `["LITELLM ESCALATE"]`, case-sensitive) — bump one tier, never pick a
-      model. Plus `/autoroute escalate` as the ergonomic front door.
-- [ ] Plan mode: read **pi's own plan mode state directly** rather than sniffing sentinel strings out of prompt
-      text. Upstream has to pattern-match client-injected strings that drift with client releases and are
-      spoofable by anyone who pastes one; in-process this is a fact we can query. Keep `planMode.patterns` as
-      an escape hatch for text-carried sentinels.
-- [ ] Floor semantics: the classified tier still wins when higher; the floor overrides a session pin only for
+- [x] `keywordTierRules`, lexical matching. Multiple matches escalate to the **highest** tier, so rule order
+      never silently changes behaviour.
+- [x] `escalationKeywords` (default `["PI ESCALATE"]`, case-sensitive) — bump one tier, never pick a model.
+- [x] Floor semantics: the classified tier still wins when higher; the floor overrides a session pin only for
       the turns in plan mode, without rewriting the pin, so the first turn after exit routes as if plan mode
       never happened.
-- [ ] Short-circuit: when the floor is the top configured tier, skip the classifier call entirely.
-- [ ] Order the whole pipeline as upstream does: session pin → top-tier plan floor → keyword rules →
-      classifier, then escalation and floor applied on top.
+- [x] Short-circuit: when the floor is the top configured tier, the classifier call is skipped entirely.
+- [x] Pipeline ordered as upstream: session pin → top-tier plan floor → keyword rules → classifier, then
+      escalation and floor on top. 29 router tests cover the pairs.
 
-**Exit criteria:** a precedence test matrix covering every pair of signals, asserted against upstream's
-documented behaviour.
+**Corrected from the previous plan.** This phase promised to "read pi's own plan mode state directly" and
+called it the headline win over upstream. That was based on a wrong assumption: **pi has no built-in plan
+mode** — it ships as an example extension, so there is no native state to query. What shipped instead is an
+integration contract — a plan-mode extension emits `autoroute:plan-mode` `{ active: boolean }` on pi's shared
+event bus — with `planMode.patterns` as the text-sentinel fallback, which is the mechanism upstream is stuck
+with.
+
+- [ ] `/autoroute escalate` as an ergonomic front door for the keyword.
 
 ## Phase 6 — Affinity and cache-cost measurement
 
 The honest open question of the whole project: per-prompt routing saves on model choice and loses on prompt
 cache misses.
 
-- [ ] `session_affinity` (pin model for the session, skip re-classification) and `deployment_affinity` — pi's
-      analogue is holding a provider/model pair steady across turns — both TTL-bounded
-      (`session_affinity_ttl_seconds` 3600, refreshed on hit).
-- [ ] Escalation re-pins higher; the plan-mode floor does not rewrite the pin.
+- [x] `sessionAffinity` (pin the model for the session, skip re-classification), TTL-bounded
+      (`ttlSeconds` 3600, refreshed on hit). Off by default, as upstream.
+- [x] Escalation re-pins higher; the plan-mode floor does not rewrite the pin.
+- [ ] `deployment_affinity` — pi's analogue is holding a provider/model pair steady across turns. Not yet
+      implemented; pi's registry may make it moot, since a `provider/modelId` already names one endpoint.
 - [ ] **Instrument before choosing defaults.** Record per-decision estimated spend *including* cache-miss cost
       on every model switch. Run a real multi-day session both ways and pick defaults from the numbers, not
       from upstream's (which are tuned for proxy traffic, not long agent sessions).
@@ -196,7 +150,6 @@ Deferred deliberately: each is only worth it once the base router is proven.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `setModel()` doesn't apply to the in-flight turn | Design-breaking | Phase 0 spike is blocking |
 | LLM classifier latency is visible in the TUI | Every prompt feels slow | Heuristic is the default; Phase 4 gates promotion on measured latency; tight timeout + cache |
 | Model switching costs more in cache misses than it saves | The whole project is net-negative | Phase 6 measures it explicitly before defaults are set |
 | Rubric ported by paraphrase | Silently different tier decisions and spend | Presets are measured artifacts; port verbatim, fixture-test against upstream examples |
@@ -204,9 +157,12 @@ Deferred deliberately: each is only worth it once the base router is proven.
 | Upstream v2 config keeps evolving | Port drifts from source | Track `complexity_router/config.py`; keep canonical key names so configs stay portable |
 | pi's extension API changes | Breaks on pi upgrade | Pin a pi version range; keep the API surface used small |
 
-## Resolved by targeting v2
+## Resolved
 
-Two risks from the previous (v1-targeted) plan are gone:
+The blocking risk is gone: **`pi.setModel()` affects the turn already in flight**, verified against pi 0.84.2
+([`docs/seam.md`](docs/seam.md)). pi also awaits the `input` handler, so the LLM classifier can run there.
+
+Two more were resolved by targeting v2 rather than v1:
 
 - *"LiteLLM's weights misclassify agent prompts"* — upstream hit this and fixed it with the `agentic`
   calibration preset. We adopt it as our default instead of building our own labelled corpus.
@@ -216,11 +172,11 @@ Two risks from the previous (v1-targeted) plan are gone:
 
 ## Open questions
 
-1. Phase 0's question — which handler can change the model for the current turn.
-2. Does `getProviderAuth()` yield credentials usable for the classifier model, and for an embeddings endpoint
-   in Phase 7, or do those need their own keys?
-3. Can pi's plan mode be queried directly from an extension, or only observed via a registered flag? Phase 5's
-   headline improvement over upstream depends on the answer.
+1. ~~Which handler can change the model for the current turn.~~ Answered: `input`, and pi awaits it.
+2. ~~Can pi's plan mode be queried directly?~~ Answered: no — pi has no built-in plan mode. Hence the
+   `autoroute:plan-mode` event contract.
+3. Does `modelRegistry.complete()` actually work for a classifier call from inside an `input` handler? Typed
+   to; never called for real.
 4. Should `classifier_context_include_assistant_turns` default on for us? Upstream defaults it off only to
    avoid shifting an already-deployed router's spend. In an agent, the assistant turn often carries the
    difficulty — measure it.
