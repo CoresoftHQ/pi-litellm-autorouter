@@ -3,9 +3,6 @@
 A [pi](https://pi.dev) extension that picks the cheapest model able to handle each prompt, automatically —
 in-process, no proxy required.
 
-> **Status:** implemented and unit-tested, but not yet run against a real session with real credentials.
-> Treat the shipped defaults as untuned.
-
 ## What it does
 
 pi normally uses one model for a whole session, switched by hand with `/model`. That's wasteful: a trivial
