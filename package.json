@@ -1,0 +1,28 @@
+{
+  "name": "@coresofthq/pi-litellm-autorouter",
+  "version": "1.0.0",
+  "description": "LiteLLM's Auto Router v2, running inside the pi coding agent",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CoresoftHQ/pi-litellm-autorouter.git"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "files": ["src", "examples", "README.md", "LICENSE"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

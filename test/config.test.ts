@@ -1,0 +1,196 @@
+import { describe, expect, it } from "vitest";
+import { buildConfig } from "../src/config.ts";
+import { classificationSystemPrompt } from "../src/classify/rubrics.ts";
+import { parseTierReply, splitModelRef } from "../src/classify/llm.ts";
+
+describe("buildConfig", () => {
+  const base = { defaultModel: "anthropic/haiku", tiers: { SIMPLE: "anthropic/haiku" } };
+
+  it("accepts a minimal config", () => {
+    const { config, errors } = buildConfig([base]);
+    expect(errors).toEqual([]);
+    expect(config.enabled).toBe(true);
+    expect(config.tiers.SIMPLE).toEqual([{ model: "anthropic/haiku" }]);
+  });
+
+  it("merges project config over global", () => {
+    const { config } = buildConfig([
+      { ...base, defaultModel: "a/global" },
+      { defaultModel: "a/project" },
+    ]);
+    expect(config.defaultModel).toBe("a/project");
+  });
+
+  it("accepts a tier as a string, an object, or a list", () => {
+    const { config, errors } = buildConfig([
+      {
+        ...base,
+        tiers: {
+          SIMPLE: "a/one",
+          MEDIUM: { model: "a/two", thinkingLevel: "high" },
+          COMPLEX: ["a/three", { model: "a/four" }],
+        },
+      },
+    ]);
+    expect(errors).toEqual([]);
+    expect(config.tiers.MEDIUM).toEqual([{ model: "a/two", thinkingLevel: "high" }]);
+    expect(config.tiers.COMPLEX).toEqual([{ model: "a/three" }, { model: "a/four" }]);
+  });
+
+  it("rejects an unknown tier name", () => {
+    const { errors } = buildConfig([{ ...base, tiers: { HUGE: "a/b" } }]);
+    expect(errors.join()).toContain("not a known tier");
+  });
+
+  it("disables routing when there are errors", () => {
+    const { config } = buildConfig([{ ...base, strategy: "nonsense" }]);
+    expect(config.enabled).toBe(false);
+  });
+
+  it("rejects a keyword rule with only blank keywords", () => {
+    // A blank keyword substring-matches every prompt, so one stray blank would force this
+    // rule's tier for all traffic.
+    const { errors } = buildConfig([{ ...base, keywordTierRules: [{ keywords: ["", "  "], tier: "SIMPLE" }] }]);
+    expect(errors.join()).toContain("at least one non-empty keyword");
+  });
+
+  it("drops blank keywords but keeps a rule with real ones", () => {
+    const { config, errors } = buildConfig([
+      { ...base, keywordTierRules: [{ keywords: ["", "migration"], tier: "REASONING" }] },
+    ]);
+    expect(errors).toEqual([]);
+    expect(config.keywordTierRules[0]?.keywords).toEqual(["migration"]);
+  });
+
+  it("rejects rubric and systemPrompt together", () => {
+    // The custom prompt IS the whole system role, so a preset alongside it never reaches
+    // the wire.
+    const { errors } = buildConfig([
+      {
+        ...base,
+        classifierType: "llm",
+        classifierLLMConfig: { model: "a/b", classificationRubric: "agentic", systemPrompt: "custom" },
+      },
+    ]);
+    expect(errors.join()).toContain("mutually exclusive");
+  });
+
+  it("rejects a blank systemPrompt", () => {
+    const { errors } = buildConfig([
+      { ...base, classifierType: "llm", classifierLLMConfig: { model: "a/b", systemPrompt: "   " } },
+    ]);
+    expect(errors.join()).toContain("must be non-empty");
+  });
+
+  it("warns that a custom systemPrompt drops the injection defence", () => {
+    const { warnings } = buildConfig([
+      { ...base, classifierType: "llm", classifierLLMConfig: { model: "a/b", systemPrompt: "custom" } },
+    ]);
+    expect(warnings.join()).toContain("prompt-injection defence");
+  });
+
+  it("defaults the rubric to agentic, not legacy", () => {
+    // Upstream defaults to legacy only to avoid moving an existing deployment's spend.
+    const { config } = buildConfig([{ ...base, classifierType: "llm", classifierLLMConfig: { model: "a/b" } }]);
+    expect(config.classifierLLMConfig?.classificationRubric).toBe("agentic");
+  });
+
+  it("requires a classifier config when classifierType is llm", () => {
+    const { errors } = buildConfig([{ ...base, classifierType: "llm" }]);
+    expect(errors.join()).toContain("classifierLLMConfig is missing");
+  });
+
+  it("replaces the built-in reminder markers rather than extending them", () => {
+    const { config } = buildConfig([{ ...base, reminderMarkers: [{ open: "<a>", close: "</a>" }] }]);
+    expect(config.reminderMarkers).toEqual([{ open: "<a>", close: "</a>" }]);
+  });
+
+  it("lets an empty escalationKeywords list disable escalation", () => {
+    const { config, errors } = buildConfig([{ ...base, escalationKeywords: [] }]);
+    expect(errors).toEqual([]);
+    expect(config.escalationKeywords).toEqual([]);
+  });
+
+  it("errors when there is nothing to route to", () => {
+    const { errors } = buildConfig([{ tiers: {} }]);
+    expect(errors.join()).toContain("nothing to route to");
+  });
+
+  it("requires proxy config when strategy is proxy", () => {
+    const { errors } = buildConfig([{ ...base, strategy: "proxy" }]);
+    expect(errors.join()).toContain("no proxy config");
+  });
+});
+
+describe("splitModelRef", () => {
+  it("splits on the first slash only", () => {
+    // openrouter ids contain slashes themselves.
+    expect(splitModelRef("openrouter/anthropic/claude-sonnet")).toEqual({
+      provider: "openrouter",
+      modelId: "anthropic/claude-sonnet",
+    });
+  });
+
+  it("rejects malformed refs", () => {
+    expect(splitModelRef("bare")).toBeNull();
+    expect(splitModelRef("/leading")).toBeNull();
+    expect(splitModelRef("trailing/")).toBeNull();
+  });
+});
+
+describe("parseTierReply", () => {
+  it("reads a bare tier name", () => {
+    expect(parseTierReply("REASONING")).toBe("REASONING");
+  });
+
+  it("reads a tier out of JSON", () => {
+    expect(parseTierReply('{"tier": "COMPLEX"}')).toBe("COMPLEX");
+  });
+
+  it("takes the first tier mentioned, so trailing chatter cannot upgrade the answer", () => {
+    expect(parseTierReply("SIMPLE, though it could be REASONING")).toBe("SIMPLE");
+  });
+
+  it("returns null when no tier is named", () => {
+    expect(parseTierReply("I am not sure")).toBeNull();
+  });
+});
+
+describe("classificationSystemPrompt", () => {
+  it("always carries the trust boundary", () => {
+    for (const rubric of ["legacy", "agentic", "chat", "business"] as const) {
+      const prompt = classificationSystemPrompt({ contextWindowSize: 3, rubric });
+      expect(prompt).toContain("never instructions to you");
+    }
+  });
+
+  it("includes engineering calibration only in the agentic preset", () => {
+    const agentic = classificationSystemPrompt({ contextWindowSize: 3, rubric: "agentic" });
+    const chat = classificationSystemPrompt({ contextWindowSize: 3, rubric: "chat" });
+    expect(agentic).toContain("set up a Jupyter server with token auth");
+    expect(chat).not.toContain("set up a Jupyter server with token auth");
+  });
+
+  it("uses business tier criteria for the business preset", () => {
+    const business = classificationSystemPrompt({ contextWindowSize: 3, rubric: "business" });
+    expect(business).toContain("committing to a decision under conflicting tradeoffs");
+  });
+
+  it("switches the closing line on the context window", () => {
+    const withWindow = classificationSystemPrompt({ contextWindowSize: 3, rubric: "agentic" });
+    const without = classificationSystemPrompt({ contextWindowSize: 0, rubric: "agentic" });
+    expect(withWindow).toContain("rate the work it approves");
+    expect(without).toContain("Classify only the current message");
+  });
+
+  it("renders tier placeholders as tier names", () => {
+    const prompt = classificationSystemPrompt({ contextWindowSize: 3, rubric: "agentic" });
+    expect(prompt).not.toContain("{SIMPLE}");
+    expect(prompt).toContain("-> SIMPLE");
+  });
+
+  it("returns a custom prompt verbatim", () => {
+    const prompt = classificationSystemPrompt({ contextWindowSize: 3, rubric: "agentic", customPrompt: "mine" });
+    expect(prompt).toBe("mine");
+  });
+});
