@@ -50,9 +50,7 @@ the extension delegates to LiteLLM's own router instead of deciding locally.
 ## Installation
 
 ```bash
-git clone https://github.com/CoresoftHQ/pi-litellm-autorouter
-cd pi-litellm-autorouter && npm install
-pi -e ./src/index.ts
+pi install @coresofthq/pi-litellm-autorouter
 # then, inside pi:  /autoroute init
 ```
 
