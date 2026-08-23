@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildConfig } from "../src/config.ts";
 import { route } from "../src/router.ts";
 import type { ExtractedTurn } from "../src/types.ts";
-import type { ModelApplier } from "../src/resolve.ts";
+import { type ModelApplier, candidatesForTier } from "../src/resolve.ts";
 
 const TIERS = {
   SIMPLE: "anthropic/haiku",
@@ -487,5 +487,42 @@ describe("route — llm classifier", () => {
     });
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.signals.some((s) => s.includes("timed out"))).toBe(true);
+  });
+});
+
+describe("candidatesForTier — upstream's get_model_for_tier", () => {
+  const POOLS = {
+    SIMPLE: "a/haiku",
+    MEDIUM: ["a/sonnet", "a/mini"],
+    COMPLEX: ["a/sonnet", { model: "a/opus", thinkingLevel: "medium" }, "a/gpt"],
+  };
+  const built = () => buildConfig([{ defaultModel: "a/haiku", tiers: POOLS }]).config;
+
+  it("picks uniformly from a list pool, like random.choice", () => {
+    const models = (draw: number) => candidatesForTier("COMPLEX", built(), () => draw).map((t) => t.model);
+    expect(models(0)[0]).toBe("a/sonnet");
+    expect(models(0.5)[0]).toBe("a/opus");
+    expect(models(0.99)[0]).toBe("a/gpt");
+    // The rest of the pool, lower tiers, then defaultModel follow as pi's credential rail.
+    expect(models(0.5)).toEqual(["a/opus", "a/sonnet", "a/gpt", "a/mini", "a/haiku"]);
+  });
+
+  it("returns a single-model tier as-is", () => {
+    expect(candidatesForTier("SIMPLE", built(), () => 0.7)[0]).toEqual({ model: "a/haiku" });
+  });
+
+  it("sends an unconfigured tier to defaultModel, then to MEDIUM", () => {
+    expect(candidatesForTier("REASONING", built(), () => 0.9)[0]).toEqual({ model: "a/haiku" });
+    const noDefault = buildConfig([{ tiers: POOLS }]).config;
+    expect(candidatesForTier("REASONING", noDefault, () => 0.9)[0]).toEqual({ model: "a/mini" });
+  });
+
+  it("routes through the injected rng end to end", async () => {
+    const config = buildConfig([{ defaultModel: "a/haiku", tiers: { ...TIERS, SIMPLE: ["a/haiku", "a/mini"] } }]).config;
+    const api = applier();
+    const low = await route({ turn: turn("hi"), config, api, now, rng: () => 0 });
+    const high = await route({ turn: turn("hi"), config, api, now, rng: () => 0.9 });
+    expect(low.decision.chosenModel).toBe("a/haiku");
+    expect(high.decision.chosenModel).toBe("a/mini");
   });
 });

@@ -34,7 +34,8 @@ Each user prompt goes through: **extract → classify → override → select �
    `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
-4. **Select** - a tier maps to one model or a pool of models (first usable wins), or, with `adaptive: true`,
+4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick, as upstream), or,
+   with `adaptive: true`,
    a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
    classified tier. See [Adaptive selection](#adaptive-selection).
 5. **Apply** - resolve the chosen model against pi's own model registry and credentials, call
@@ -198,7 +199,7 @@ in it ("help me roll out my k8s cluster") still hits a rule for `"kubernetes dep
 
 ### Adaptive selection
 
-Off by default. With `adaptive: true`, a tier's pool is no longer walked in order: every model gets a
+Off by default. With `adaptive: true`, a tier's pool is no longer sampled uniformly: every model gets a
 Beta posterior per request type (`code_generation`, `code_understanding`, `technical_design`,
 `analytical_reasoning`, `writing`, `factual_lookup`, `general`), and each prompt draws one Thompson sample
 per candidate and scores it as
@@ -232,7 +233,7 @@ its cold-start phase (unobserved models in the classified tier are tried uniform
 - `qualityTier` (1–3, default 2) and `strengths` on a tier entry set the cold-start prior, mirroring upstream's
   `model_info.adaptive_router_preferences`. Prices come from pi's model registry.
 - Only the classifier path is adaptive, as upstream: `keywordTierRules`, a session-affinity pin and the plan-mode
-  shortcut still take the plain pool walk.
+  shortcut still take the plain uniform pool pick.
 
 The bandit learns from what happens after each pick, using upstream's signal detectors on pi's `agent_end`
 event: a rephrase or a "forget it" in the next prompt counts against the model that produced the previous

@@ -26,7 +26,7 @@ import {
   resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
 import type { SemanticMatcher } from "./classify/semantic.ts";
-import { type ModelApplier, applyFirstUsable, candidatesForTier } from "./resolve.ts";
+import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
@@ -54,11 +54,13 @@ export interface RouteInput {
   now?: () => number;
   callerSystemPrompt?: string;
   /** The bandit state, when `config.adaptive` is on. Without it routing degrades to the
-   *  first-usable pool walk rather than failing. */
+   *  uniform pool pick rather than failing. */
   adaptive?: AdaptiveRouter | null;
   /** The embedding matcher, when `config.semanticKeywordMatching` is on. Without it the
    *  rules are skipped and the prompt is scored, as on any embedding failure. */
   semantic?: SemanticMatcher | null;
+  /** Uniform draw in [0, 1) for the pool pick; defaults to `Math.random`. */
+  rng?: Rng;
 }
 
 export interface RouteOutput {
@@ -133,6 +135,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const now = input.now ?? Date.now;
   const startedAt = now();
   const { config, turn, api } = input;
+  const rng = input.rng ?? Math.random;
   const decision = emptyDecision();
 
   let consumedOneShot = false;
@@ -141,7 +144,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
    * Candidates for a classified tier, bandit first when adaptive is on.
    *
    * Only the classifier path is adaptive, as upstream: keyword overrides, session pins and
-   * the plan-mode shortcut name a tier or model outright and take the plain pool walk. The
+   * the plan-mode shortcut name a tier or model outright and take the plain uniform pool pick. The
    * bandit's pick leads the list; the ordinary chain follows so a pick pi cannot apply
    * (no credentials, say) degrades the same way any first choice does.
    */
@@ -158,7 +161,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     decision.adaptive = pick.decision;
     decision.signals = [...decision.signals, `adaptive:${pick.decision.phase}`];
     const chosen = targetForModel(pick.model, tier, config);
-    return [chosen, ...candidatesForTier(tier, config).filter((target) => target.model !== pick.model)];
+    return [chosen, ...candidatesForTier(tier, config, rng).filter((target) => target.model !== pick.model)];
   };
 
   const finish = async (
@@ -167,7 +170,8 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     explicitCandidates?: TierTarget[],
   ): Promise<RouteOutput> => {
     const candidates =
-      explicitCandidates ?? (tier ? candidatesForTier(tier, config) : config.defaultModel ? [{ model: config.defaultModel }] : []);
+      explicitCandidates ??
+      (tier ? candidatesForTier(tier, config, rng) : config.defaultModel ? [{ model: config.defaultModel }] : []);
     const { applied, problems } = await applyFirstUsable(candidates, api);
     decision.tier = tier;
     decision.latencyMs = now() - startedAt;
