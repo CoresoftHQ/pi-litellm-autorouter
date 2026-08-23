@@ -490,6 +490,35 @@ describe("route — llm classifier", () => {
   });
 });
 
+describe("defaultModel thinking level", () => {
+  const withLevel = () =>
+    buildConfig([{ defaultModel: { model: "a/haiku", thinkingLevel: "low" }, tiers: { MEDIUM: "a/sonnet" } }]).config;
+
+  it("applies it when classification falls back to defaultModel", async () => {
+    const levels: string[] = [];
+    const api = applier({ setThinkingLevel: (level) => levels.push(level) });
+    const { decision } = await route({ turn: turn(null), config: withLevel(), api, now });
+    expect(decision.cause).toBe("default_fallback");
+    expect(decision.chosenModel).toBe("a/haiku");
+    expect(decision.thinkingLevel).toBe("low");
+    expect(levels).toEqual(["low"]);
+  });
+
+  it("applies it when an unconfigured tier routes to defaultModel", async () => {
+    const levels: string[] = [];
+    const api = applier({ setThinkingLevel: (level) => levels.push(level) });
+    const { decision } = await route({ turn: turn("hi"), config: withLevel(), api, now });
+    expect(decision.tier).toBe("SIMPLE");
+    expect(decision.chosenModel).toBe("a/haiku");
+    expect(decision.thinkingLevel).toBe("low");
+  });
+
+  it("carries it on the credential rail too", () => {
+    const candidates = candidatesForTier("MEDIUM", withLevel(), () => 0);
+    expect(candidates).toEqual([{ model: "a/sonnet" }, { model: "a/haiku", thinkingLevel: "low" }]);
+  });
+});
+
 describe("candidatesForTier — upstream's get_model_for_tier", () => {
   const POOLS = {
     SIMPLE: "a/haiku",

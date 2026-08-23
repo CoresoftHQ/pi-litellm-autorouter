@@ -27,10 +27,13 @@ import {
   type ModelRef,
   type RequestType,
   REQUEST_TYPES,
+  THINKING_LEVELS,
+  type ThinkingLevel,
   type Tier,
   type TierTarget,
   TIER_SEVERITY_ORDER,
   isRequestType,
+  isThinkingLevel,
   isTier,
 } from "./types.ts";
 
@@ -59,6 +62,9 @@ export interface ClassifierLLMConfig {
 export interface RouterConfig {
   enabled: boolean;
   defaultModel: ModelRef | null;
+  /** Applied alongside `defaultModel` whenever it is the model chosen. Set by writing
+   *  `defaultModel` as `{ model, thinkingLevel }`, the same shape as a tier entry. */
+  defaultModelThinkingLevel: ThinkingLevel | null;
   tiers: Record<Tier, TierTarget[]>;
   tierBoundaries: Record<string, number>;
   tokenThresholds: Record<string, number>;
@@ -145,6 +151,7 @@ export function defaultConfig(): RouterConfig {
   return {
     enabled: true,
     defaultModel: null,
+    defaultModelThinkingLevel: null,
     tiers: { ...EMPTY_TIERS },
     tierBoundaries: { ...DEFAULT_TIER_BOUNDARIES },
     tokenThresholds: { ...DEFAULT_TOKEN_THRESHOLDS },
@@ -191,8 +198,12 @@ function parseTierTargets(raw: unknown, tier: string, errors: string[]): TierTar
     }
     if (isRecord(entry) && typeof entry.model === "string" && entry.model.trim()) {
       const target: TierTarget = { model: entry.model.trim() };
-      if (typeof entry.thinkingLevel === "string") {
-        target.thinkingLevel = entry.thinkingLevel as TierTarget["thinkingLevel"];
+      if (entry.thinkingLevel !== undefined) {
+        if (isThinkingLevel(entry.thinkingLevel)) {
+          target.thinkingLevel = entry.thinkingLevel;
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
+        }
       }
       if (entry.qualityTier !== undefined) {
         if (entry.qualityTier === 1 || entry.qualityTier === 2 || entry.qualityTier === 3) {
@@ -239,8 +250,23 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
 
   if (typeof raw.enabled === "boolean") config.enabled = raw.enabled;
 
-  if (typeof raw.defaultModel === "string" && raw.defaultModel.trim()) {
-    config.defaultModel = raw.defaultModel.trim();
+  if (raw.defaultModel !== undefined) {
+    // Same shape as a tier entry: a model string, or { model, thinkingLevel }.
+    const value = raw.defaultModel;
+    if (typeof value === "string" && value.trim()) {
+      config.defaultModel = value.trim();
+    } else if (isRecord(value) && typeof value.model === "string" && value.model.trim()) {
+      config.defaultModel = value.model.trim();
+      if (value.thinkingLevel !== undefined) {
+        if (isThinkingLevel(value.thinkingLevel)) {
+          config.defaultModelThinkingLevel = value.thinkingLevel;
+        } else {
+          errors.push(`defaultModel.thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
+        }
+      }
+    } else {
+      errors.push("defaultModel must be a model string or { model, thinkingLevel }");
+    }
   }
 
   if (raw.tiers !== undefined) {

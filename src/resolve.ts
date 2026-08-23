@@ -33,6 +33,14 @@ export interface Applied {
   fellBackBecause?: string;
 }
 
+/** `defaultModel` as a candidate, thinking level included; null when none is set. */
+export function defaultTarget(config: RouterConfig): TierTarget | null {
+  if (!config.defaultModel) return null;
+  const target: TierTarget = { model: config.defaultModel };
+  if (config.defaultModelThinkingLevel) target.thinkingLevel = config.defaultModelThinkingLevel;
+  return target;
+}
+
 /** Uniform draw in [0, 1). Injected so tests can pin the pool pick. */
 export type Rng = () => number;
 
@@ -60,7 +68,7 @@ export function candidatesForTier(tier: Tier, config: RouterConfig, rng: Rng = M
   const candidates: TierTarget[] = [];
   const seen = new Set<string>();
 
-  const push = (target: TierTarget | undefined) => {
+  const push = (target: TierTarget | null | undefined) => {
     if (!target) return;
     const key = `${target.model}::${target.thinkingLevel ?? ""}`;
     if (seen.has(key)) return;
@@ -73,7 +81,7 @@ export function candidatesForTier(tier: Tier, config: RouterConfig, rng: Rng = M
   if (pool.length > 0) {
     push(randomChoice(pool, rng));
   } else if (config.defaultModel) {
-    push({ model: config.defaultModel });
+    push(defaultTarget(config));
   } else {
     push(randomChoice(config.tiers.MEDIUM, rng));
   }
@@ -85,7 +93,7 @@ export function candidatesForTier(tier: Tier, config: RouterConfig, rng: Rng = M
     if (!lower) continue;
     for (const target of config.tiers[lower]) push(target);
   }
-  if (config.defaultModel) push({ model: config.defaultModel });
+  push(defaultTarget(config));
   return candidates;
 }
 

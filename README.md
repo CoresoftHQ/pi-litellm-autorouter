@@ -77,7 +77,12 @@ Once it behaves, drop `-e` and point `settings.json` at the clone instead, so `/
 }
 ```
 
-Model names are `provider/model-id`, exactly as pi's `/model` picker shows them.
+Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. `defaultModel` takes the same
+shape as a tier entry, so it can carry a thinking level too:
+
+```json
+{ "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" } }
+```
 
 ### Example: heuristic classifier (default)
 

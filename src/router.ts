@@ -26,7 +26,7 @@ import {
   resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
 import type { SemanticMatcher } from "./classify/semantic.ts";
-import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier } from "./resolve.ts";
+import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier, defaultTarget } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
@@ -171,7 +171,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   ): Promise<RouteOutput> => {
     const candidates =
       explicitCandidates ??
-      (tier ? candidatesForTier(tier, config, rng) : config.defaultModel ? [{ model: config.defaultModel }] : []);
+      (tier ? candidatesForTier(tier, config, rng) : [defaultTarget(config)].filter((t): t is TierTarget => t !== null));
     const { applied, problems } = await applyFirstUsable(candidates, api);
     decision.tier = tier;
     decision.latencyMs = now() - startedAt;

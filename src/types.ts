@@ -20,7 +20,13 @@ export function tierSeverity(tier: Tier): number {
   return TIER_SEVERITY_ORDER.indexOf(tier);
 }
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
 
 /** A model reference as written in config: `provider/modelId`. */
 export type ModelRef = string;

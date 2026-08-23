@@ -21,6 +21,29 @@ describe("buildConfig", () => {
     expect(config.defaultModel).toBe("a/project");
   });
 
+  it("accepts defaultModel as a string or as { model, thinkingLevel }", () => {
+    const plain = buildConfig([base]);
+    expect(plain.config.defaultModel).toBe("anthropic/haiku");
+    expect(plain.config.defaultModelThinkingLevel).toBeNull();
+
+    const withLevel = buildConfig([{ ...base, defaultModel: { model: " a/two ", thinkingLevel: "low" } }]);
+    expect(withLevel.errors).toEqual([]);
+    expect(withLevel.config.defaultModel).toBe("a/two");
+    expect(withLevel.config.defaultModelThinkingLevel).toBe("low");
+  });
+
+  it("rejects a malformed defaultModel or thinking level", () => {
+    expect(buildConfig([{ ...base, defaultModel: 7 }]).errors).toEqual([
+      "defaultModel must be a model string or { model, thinkingLevel }",
+    ]);
+    expect(buildConfig([{ ...base, defaultModel: { model: "a/x", thinkingLevel: "turbo" } }]).errors).toEqual([
+      "defaultModel.thinkingLevel must be one of off, minimal, low, medium, high, xhigh, max",
+    ]);
+    expect(buildConfig([{ ...base, tiers: { SIMPLE: { model: "a/x", thinkingLevel: "turbo" } } }]).errors).toEqual([
+      'tiers.SIMPLE: "a/x" thinkingLevel must be one of off, minimal, low, medium, high, xhigh, max',
+    ]);
+  });
+
   it("accepts a tier as a string, an object, or a list", () => {
     const { config, errors } = buildConfig([
       {
