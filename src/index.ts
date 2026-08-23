@@ -14,6 +14,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type RouterConfig, loadConfig } from "./config.ts";
+import { buildAdaptiveRouter, turnFromRun } from "./adaptive/index.ts";
+import { classifyRequestType } from "./adaptive/request-type.ts";
+import type { AdaptiveRouter } from "./adaptive/router.ts";
+import { defaultAdaptiveStorePath, readPersistedCells, writePersistedCells } from "./adaptive/store.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
 import { splitModelRef } from "./classify/llm.ts";
 import {
@@ -21,6 +25,7 @@ import {
   DECISION_ENTRY_TYPE,
   STATE_ENTRY_TYPE,
   explain,
+  renderAdaptiveSnapshot,
   statusLine,
 } from "./decision.ts";
 import { extractTurn, type SimpleMessage } from "./extract.ts";
@@ -39,6 +44,10 @@ export default function autorouter(pi: ExtensionAPI): void {
   let state: AutorouteState = {};
   let pin: SessionPin | null = null;
   let lastDecision: RouteDecision | null = null;
+  /** The ask the last decision was made on; what the bandit credits feedback against. */
+  let lastRoutedAsk: string | null = null;
+  let adaptive: AdaptiveRouter | null = null;
+  const adaptiveStorePath = defaultAdaptiveStorePath();
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
@@ -94,6 +103,16 @@ export default function autorouter(pi: ExtensionAPI): void {
     pi.appendEntry<AutorouteState>(STATE_ENTRY_TYPE, state);
   };
 
+  /**
+   * (Re)build the bandit for the current config, overlaying whatever it learned before.
+   * Posteriors for models no longer in any pool are dropped on load, so a config change
+   * never carries stale beliefs across.
+   */
+  const rebuildAdaptive = (ctx: ExtensionContext): void => {
+    adaptive = config ? buildAdaptiveRouter(config, { registry: ctx.modelRegistry }) : null;
+    if (adaptive) adaptive.load(readPersistedCells(adaptiveStorePath));
+  };
+
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
     if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
@@ -109,6 +128,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configErrors = loaded.errors;
     configSources = loaded.sources;
     restoreState(ctx);
+    rebuildAdaptive(ctx);
     try {
       availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
     } catch {
@@ -193,10 +213,12 @@ export default function autorouter(pi: ExtensionAPI): void {
         pin,
         oneShot,
         callerSystemPrompt: undefined,
+        adaptive,
       });
 
       applyingOwnModel = false;
       lastDecision = result.decision;
+      lastRoutedAsk = turn.currentAsk;
       if (result.pinToWrite) pin = result.pinToWrite;
       if (result.consumedOneShot) {
         state.nextModel = null;
@@ -217,6 +239,23 @@ export default function autorouter(pi: ExtensionAPI): void {
     }
 
     return { action: "continue" as const };
+  });
+
+  // The bandit learns from what happened after its pick: a rephrase or a "forget it" in
+  // the next prompt counts against the model that produced the previous reply, a tool-call
+  // loop or a near-duplicate reply counts against the model that produced this one.
+  // Upstream does this from the proxy's post-call hook; `agent_end` is pi's equivalent.
+  pi.on("agent_end", async (event, ctx) => {
+    if (!config?.adaptive || !adaptive) return;
+    const model = lastDecision?.chosenModel;
+    if (!model) return;
+    try {
+      const turn = turnFromRun(lastRoutedAsk, event.messages as never);
+      adaptive.recordTurn(ctx.sessionManager.getSessionId(), model, classifyRequestType(lastRoutedAsk), turn);
+      writePersistedCells(adaptiveStorePath, adaptive.serialize());
+    } catch {
+      // Learning is a bonus on top of routing; a failure here must not surface as one.
+    }
   });
 
   /**
@@ -293,6 +332,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configWarnings = loaded.warnings;
     configErrors = loaded.errors;
     configSources = loaded.sources;
+    rebuildAdaptive(ctx);
 
     ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
   };
@@ -311,7 +351,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           .map((ref) => ({ value: `${verb} ${ref}`, label: ref }));
         return matches.length > 0 ? matches : null;
       }
-      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "status"];
+      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "adaptive", "status"];
       const items = verbs.filter((v) => v.startsWith(prefix)).map((v) => ({ value: v, label: v }));
       return items.length > 0 ? items : null;
     },
@@ -400,6 +440,15 @@ export default function autorouter(pi: ExtensionAPI): void {
           return;
         }
 
+        case "adaptive": {
+          if (!config?.adaptive || !adaptive) {
+            ctx.ui.notify("autoroute: adaptive selection is off (set \"adaptive\": true in autorouter.json)", "info");
+            return;
+          }
+          ctx.ui.notify(renderAdaptiveSnapshot(adaptive.snapshot(), config, adaptiveStorePath), "info");
+          return;
+        }
+
         default: {
           const lines: string[] = [];
           const why = routingDisabled();
@@ -412,6 +461,11 @@ export default function autorouter(pi: ExtensionAPI): void {
                   : ""
               }`,
             );
+            if (config.adaptive) {
+              lines.push(
+                `adaptive: on (${config.adaptiveEligible}, quality ${config.adaptiveWeights.quality} / cost ${config.adaptiveWeights.cost}, penalty ${config.tierDistancePenalty})`,
+              );
+            }
           }
           if (configSources.length > 0) lines.push(`config:   ${configSources.join(", ")}`);
           for (const error of configErrors) lines.push(`error:    ${error}`);

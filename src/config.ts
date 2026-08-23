@@ -23,7 +23,16 @@ import {
   DEFAULT_TIER_BOUNDARIES,
   DEFAULT_TOKEN_THRESHOLDS,
 } from "./defaults.ts";
-import { type ModelRef, type Tier, type TierTarget, TIER_SEVERITY_ORDER, isTier } from "./types.ts";
+import {
+  type ModelRef,
+  type RequestType,
+  REQUEST_TYPES,
+  type Tier,
+  type TierTarget,
+  TIER_SEVERITY_ORDER,
+  isRequestType,
+  isTier,
+} from "./types.ts";
 
 export type ClassifierType = "heuristic" | "llm";
 export type ClassifierFallback = "heuristic" | "default_model";
@@ -75,7 +84,27 @@ export interface RouterConfig {
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
   reminderMarkers: ReminderMarkerPair[];
+  /** Thompson-sample within/across the tier pools instead of taking the first usable model. */
+  adaptive: boolean;
+  adaptiveWeights: AdaptiveWeights;
+  /** Score penalty per tier-step between a candidate's home tier and the classified tier. */
+  tierDistancePenalty: number;
+  /** `all` scores every pool model with the distance penalty (soft floors);
+   *  `classified_tier` samples only inside the classified tier's pool. */
+  adaptiveEligible: AdaptiveEligible;
 }
+
+export interface AdaptiveWeights {
+  quality: number;
+  cost: number;
+}
+
+export type AdaptiveEligible = "all" | "classified_tier";
+
+/** Upstream's complexity-router default leans on cost; the standalone adaptive router
+ *  defaults the other way (0.7 / 0.3), but this is a port of the complexity router. */
+export const DEFAULT_ADAPTIVE_WEIGHTS: Readonly<AdaptiveWeights> = { quality: 0.3, cost: 0.7 };
+export const DEFAULT_TIER_DISTANCE_PENALTY = 0.5;
 
 export interface LoadedConfig {
   config: RouterConfig;
@@ -117,6 +146,10 @@ export function defaultConfig(): RouterConfig {
     sessionAffinity: false,
     sessionAffinityTtlSeconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
     reminderMarkers: DEFAULT_REMINDER_MARKERS.map((m) => ({ ...m })),
+    adaptive: false,
+    adaptiveWeights: { ...DEFAULT_ADAPTIVE_WEIGHTS },
+    tierDistancePenalty: DEFAULT_TIER_DISTANCE_PENALTY,
+    adaptiveEligible: "all",
   };
 }
 
@@ -138,6 +171,20 @@ function parseTierTargets(raw: unknown, tier: string, errors: string[]): TierTar
       const target: TierTarget = { model: entry.model.trim() };
       if (typeof entry.thinkingLevel === "string") {
         target.thinkingLevel = entry.thinkingLevel as TierTarget["thinkingLevel"];
+      }
+      if (entry.qualityTier !== undefined) {
+        if (entry.qualityTier === 1 || entry.qualityTier === 2 || entry.qualityTier === 3) {
+          target.qualityTier = entry.qualityTier;
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" qualityTier must be 1, 2 or 3`);
+        }
+      }
+      if (entry.strengths !== undefined) {
+        if (Array.isArray(entry.strengths) && entry.strengths.every(isRequestType)) {
+          target.strengths = entry.strengths as RequestType[];
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" strengths must be a list of ${REQUEST_TYPES.join(", ")}`);
+        }
       }
       targets.push(target);
       continue;
@@ -392,6 +439,44 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     }
   }
 
+  if (raw.adaptive !== undefined) {
+    if (typeof raw.adaptive === "boolean") {
+      config.adaptive = raw.adaptive;
+    } else {
+      errors.push("adaptive must be a boolean");
+    }
+  }
+
+  if (raw.adaptiveWeights !== undefined) {
+    const value = raw.adaptiveWeights;
+    const inUnit = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+    if (!isRecord(value) || !inUnit(value.quality) || !inUnit(value.cost)) {
+      errors.push("adaptiveWeights must be { quality, cost } with both in [0, 1]");
+    } else if (Math.abs(value.quality + value.cost - 1) > 0.001) {
+      // The two terms are the whole score: a sum that is not 1 just rescales it, and a
+      // sum that differs from the operator's mental model hides which term dominates.
+      errors.push(`adaptiveWeights must sum to 1.0, got quality=${value.quality} + cost=${value.cost}`);
+    } else {
+      config.adaptiveWeights = { quality: value.quality, cost: value.cost };
+    }
+  }
+
+  if (raw.tierDistancePenalty !== undefined) {
+    if (typeof raw.tierDistancePenalty === "number" && Number.isFinite(raw.tierDistancePenalty) && raw.tierDistancePenalty >= 0) {
+      config.tierDistancePenalty = raw.tierDistancePenalty;
+    } else {
+      errors.push("tierDistancePenalty must be a number >= 0");
+    }
+  }
+
+  if (raw.adaptiveEligible !== undefined) {
+    if (raw.adaptiveEligible === "all" || raw.adaptiveEligible === "classified_tier") {
+      config.adaptiveEligible = raw.adaptiveEligible;
+    } else {
+      errors.push(`adaptiveEligible must be "all" or "classified_tier"`);
+    }
+  }
+
   if (raw.reminderMarkers !== undefined) {
     if (!Array.isArray(raw.reminderMarkers) || raw.reminderMarkers.length === 0) {
       errors.push("reminderMarkers must be a non-empty array of { open, close } pairs");
@@ -426,6 +511,15 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     if (config.tiers[tier].length === 0 && configuredTiers.length > 0) {
       warnings.push(`tiers.${tier} has no models; requests classified there fall back to the next candidate`);
     }
+  }
+
+  if (config.adaptive) {
+    // The bandit chooses among pool models; defaultModel alone is a fallback, not a pool.
+    if (configuredTiers.length === 0) {
+      errors.push("adaptive requires at least one non-empty tier pool");
+    }
+    // Upstream rejects explicitly-empty pools under adaptive=True. Here an unset tier and
+    // an empty one look the same, so the generic empty-tier warning above stands in.
   }
 
   if (errors.length > 0) config.enabled = false;

@@ -129,6 +129,54 @@ describe("buildConfig", () => {
     expect(config.enabled).toBe(false);
   });
 
+  it("parses the adaptive knobs and per-model preferences", () => {
+    const { config, errors } = buildConfig([
+      {
+        ...base,
+        adaptive: true,
+        adaptiveWeights: { quality: 0.6, cost: 0.4 },
+        tierDistancePenalty: 0.2,
+        adaptiveEligible: "classified_tier",
+        tiers: { SIMPLE: { model: "a/one", qualityTier: 1, strengths: ["writing", "factual_lookup"] } },
+      },
+    ]);
+    expect(errors).toEqual([]);
+    expect(config.adaptive).toBe(true);
+    expect(config.adaptiveWeights).toEqual({ quality: 0.6, cost: 0.4 });
+    expect(config.tierDistancePenalty).toBe(0.2);
+    expect(config.adaptiveEligible).toBe("classified_tier");
+    expect(config.tiers.SIMPLE).toEqual([{ model: "a/one", qualityTier: 1, strengths: ["writing", "factual_lookup"] }]);
+  });
+
+  it("rejects adaptive weights that do not sum to one", () => {
+    const { errors } = buildConfig([{ ...base, adaptiveWeights: { quality: 0.5, cost: 0.3 } }]);
+    expect(errors).toEqual(["adaptiveWeights must sum to 1.0, got quality=0.5 + cost=0.3"]);
+  });
+
+  it("rejects bad adaptive values", () => {
+    const { errors } = buildConfig([
+      {
+        ...base,
+        adaptive: "yes",
+        tierDistancePenalty: -1,
+        adaptiveEligible: "some",
+        tiers: { SIMPLE: { model: "a/one", qualityTier: 4, strengths: ["poetry"] } },
+      },
+    ]);
+    expect(errors).toEqual([
+      'tiers.SIMPLE: "a/one" qualityTier must be 1, 2 or 3',
+      expect.stringMatching(/strengths must be a list of/),
+      "adaptive must be a boolean",
+      "tierDistancePenalty must be a number >= 0",
+      'adaptiveEligible must be "all" or "classified_tier"',
+    ]);
+  });
+
+  it("requires a tier pool for adaptive selection", () => {
+    const { errors } = buildConfig([{ defaultModel: "a/one", adaptive: true }]);
+    expect(errors).toEqual(["adaptive requires at least one non-empty tier pool"]);
+  });
+
   it("errors when there is nothing to route to", () => {
     const { errors } = buildConfig([{ tiers: {} }]);
     expect(errors.join()).toContain("nothing to route to");

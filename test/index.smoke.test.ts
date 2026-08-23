@@ -526,3 +526,102 @@ describe("extension wiring", () => {
     expect(m.setModelCalls).toEqual(["anthropic/sonnet", "anthropic/haiku"]);
   });
 });
+
+describe("adaptive wiring", () => {
+  let dir: string;
+  let home: string;
+  let originalHome: string | undefined;
+
+  const ADAPTIVE_CONFIG = {
+    ...CONFIG,
+    adaptive: true,
+    tiers: { SIMPLE: ["anthropic/haiku", "openai/gpt-mini"], MEDIUM: "anthropic/sonnet", COMPLEX: "anthropic/sonnet", REASONING: "anthropic/opus" },
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+    home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(ADAPTIVE_CONFIG));
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function adaptiveCtx() {
+    return mockCtx(dir, {
+      sessionManager: {
+        getBranch: () => [],
+        getEntries: () => [],
+        getSessionFile: () => "/tmp/session.jsonl",
+        getSessionId: () => "session-1",
+      },
+      modelRegistry: {
+        find: (provider: string, modelId: string) => CATALOGUE.find((m) => m.provider === provider && m.id === modelId),
+        getAvailable: () => CATALOGUE,
+        complete: vi.fn(),
+      },
+    });
+  }
+
+  it("picks from the pool, learns from the run, and persists what it learned", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = adaptiveCtx();
+    await m.fire("session_start", { reason: "startup" }, ctx);
+
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.adaptive?.phase).toBe("cold_start");
+    expect(["anthropic/haiku", "openai/gpt-mini"]).toContain(decision.chosenModel);
+    expect(m.setModelCalls).toEqual([decision.chosenModel]);
+
+    // A run whose tool result errored is a failure signal against the chosen model.
+    await m.fire(
+      "agent_end",
+      {
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "x" } }], stopReason: "toolUse" },
+          { role: "toolResult", content: [{ type: "text", text: "command not found" }], isError: true },
+          { role: "assistant", content: [{ type: "text", text: "that failed" }], stopReason: "stop" },
+        ],
+      },
+      ctx,
+    );
+
+    const storePath = join(home, ".pi", "agent", "autorouter-adaptive.json");
+    expect(existsSync(storePath)).toBe(true);
+    const persisted = JSON.parse(readFileSync(storePath, "utf8")) as { cells: { model: string; requestType: string; beta: number }[] };
+    const cell = persisted.cells.find((c) => c.model === decision.chosenModel && c.requestType === "general")!;
+    expect(cell.beta).toBeCloseTo(6); // prior 5 + 1 failure
+
+    // A fresh session overlays the persisted posterior on its priors.
+    const again = mockPi();
+    autorouter(again.pi as never);
+    const ctx2 = adaptiveCtx();
+    await again.fire("session_start", { reason: "startup" }, ctx2);
+    await again.commands.get("autoroute")!.handler("adaptive", ctx2);
+    const shown = (ctx2.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+    expect(shown).toContain("general:");
+    expect(shown).toContain("samples   1");
+  });
+
+  it("reports adaptive as off when the config does not enable it", async () => {
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = adaptiveCtx();
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("adaptive", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/adaptive selection is off/), "info");
+    await m.fire("agent_end", { messages: [] }, ctx);
+    expect(existsSync(join(home, ".pi", "agent", "autorouter-adaptive.json"))).toBe(false);
+  });
+});

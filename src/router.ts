@@ -9,6 +9,7 @@
  *   3. keyword tier rules
  *   4. classifier (llm, falling back per `classifierFallback`; else heuristic)
  *   then: escalation keyword (+1 tier), then plan-mode floor
+ *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
  *
  * This module is deliberately free of pi imports: it takes an applier and a registry, so
  * the whole decision path is testable without a running agent.
@@ -25,6 +26,8 @@ import {
   matchedEscalationKeyword,
 } from "./classify/keywords.ts";
 import { type ModelApplier, applyFirstUsable, candidatesForTier } from "./resolve.ts";
+import type { AdaptiveRouter } from "./adaptive/router.ts";
+import { softFloorPick, targetForModel } from "./adaptive/select.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
 
 export interface SessionPin {
@@ -49,6 +52,9 @@ export interface RouteInput {
   /** Injected for testability; defaults to `Date.now`. */
   now?: () => number;
   callerSystemPrompt?: string;
+  /** The bandit state, when `config.adaptive` is on. Without it routing degrades to the
+   *  first-usable pool walk rather than failing. */
+  adaptive?: AdaptiveRouter | null;
 }
 
 export interface RouteOutput {
@@ -126,6 +132,30 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const decision = emptyDecision();
 
   let consumedOneShot = false;
+
+  /**
+   * Candidates for a classified tier, bandit first when adaptive is on.
+   *
+   * Only the classifier path is adaptive, as upstream: keyword overrides, session pins and
+   * the plan-mode shortcut name a tier or model outright and take the plain pool walk. The
+   * bandit's pick leads the list; the ordinary chain follows so a pick pi cannot apply
+   * (no credentials, say) degrades the same way any first choice does.
+   */
+  const adaptiveCandidates = (tier: Tier, hardFloor: Tier | null): TierTarget[] | null => {
+    if (!config.adaptive || !input.adaptive || !turn.currentAsk) return null;
+    const pick = softFloorPick({
+      classifiedTier: tier,
+      userMessage: turn.currentAsk,
+      config,
+      adaptive: input.adaptive,
+      hardFloor,
+    });
+    if (!pick) return null;
+    decision.adaptive = pick.decision;
+    decision.signals = [...decision.signals, `adaptive:${pick.decision.phase}`];
+    const chosen = targetForModel(pick.model, tier, config);
+    return [chosen, ...candidatesForTier(tier, config).filter((target) => target.model !== pick.model)];
+  };
 
   const finish = async (
     tier: Tier | null,
@@ -250,7 +280,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     }
     const tier = applyFloor("MEDIUM", planFloor);
     decision.planFloored = planFloor !== null;
-    return finish(tier, null);
+    return finish(tier, null, adaptiveCandidates(tier, planFloor) ?? undefined);
   }
 
   decision.score = classification.score ?? null;
@@ -278,5 +308,10 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
       ? { model: "", tier, expiresAt: now() + config.sessionAffinityTtlSeconds * 1000 }
       : null;
 
-  return finish(tier, pinToWrite);
+  // The hard floor is passed whenever the sentinel is present, not only when the floor
+  // moved the tier: a request classified *at* the floor has planFloored false, yet the
+  // `all` eligibility mode scores every model and only penalises distance, so without the
+  // floor the bandit could still route below it — and a floor a bandit can slide under is
+  // not a floor.
+  return finish(tier, pinToWrite, adaptiveCandidates(tier, planFloor) ?? undefined);
 }
