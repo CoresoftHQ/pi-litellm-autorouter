@@ -33,6 +33,65 @@ export function statusLine(decision: RouteDecision): string {
   return parts.join(" · ");
 }
 
+/**
+ * One greppable line per decision, in the shape of upstream's
+ * `ComplexityRouter: routing decision cause=..., tier=..., score=..., signals=[...], routed_model=...`
+ * so `cause=` searches work the same against pi's console and a LiteLLM proxy log.
+ */
+export function decisionLogLine(decision: RouteDecision): string {
+  const parts = [`cause=${decision.cause}`];
+  if (decision.tier) parts.push(`tier=${decision.tier}`);
+  if (decision.score !== null) parts.push(`score=${decision.score.toFixed(3)}`);
+  if (decision.signals.length > 0) parts.push(`signals=[${decision.signals.join(", ")}]`);
+  parts.push(`routed_model=${decision.chosenModel ?? "(unchanged)"}`);
+  if (decision.thinkingLevel) parts.push(`thinking=${decision.thinkingLevel}`);
+  if (decision.matchedKeyword) parts.push(`keyword=${JSON.stringify(decision.matchedKeyword)}`);
+  if (decision.escalated) parts.push("escalated=true");
+  if (decision.planFloored) parts.push("plan_floored=true");
+  if (decision.fellBackBecause) parts.push(`fallback=${JSON.stringify(decision.fellBackBecause)}`);
+  return `autoroute: routing decision ${parts.join(", ")}`;
+}
+
+/** The slice of pi's TUI theme the renderer needs. */
+export interface DecisionTheme {
+  fg(color: "dim" | "accent" | "muted", text: string): string;
+}
+
+/** The slice of pi's TUI `Component` the renderer returns. */
+export interface DecisionComponent {
+  render(width: number): string[];
+  invalidate(): void;
+}
+
+/** Hard-wrap `text` to `width` columns, breaking at spaces where possible. */
+function wrap(text: string, width: number): string[] {
+  if (width <= 0 || text.length <= width) return [text];
+  const lines: string[] = [];
+  let rest = text;
+  while (rest.length > width) {
+    let cut = rest.lastIndexOf(" ", width);
+    if (cut <= 0) cut = width;
+    lines.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^ /, "");
+  }
+  if (rest) lines.push(rest);
+  return lines;
+}
+
+/**
+ * How a decision entry is drawn in the chat: the log line, or the full explanation when
+ * tool output is expanded (ctrl+o). Drawn dim so it reads as console output, not as a
+ * message. Implemented against the `Component` shape rather than pi-tui's `Text` so the
+ * extension needs no second runtime dependency.
+ */
+export function renderDecisionEntry(decision: RouteDecision, expanded: boolean, theme: DecisionTheme): DecisionComponent {
+  const text = expanded ? `${decisionLogLine(decision)}\n${explain(decision)}` : decisionLogLine(decision);
+  return {
+    render: (width) => text.split("\n").flatMap((line) => wrap(line, width).map((chunk) => theme.fg("dim", chunk))),
+    invalidate: () => {},
+  };
+}
+
 /** Multi-line explanation for `/autoroute` and `/autoroute explain`. */
 export function explain(decision: RouteDecision, dimensions?: { name: string; score: number; signal?: string }[]): string {
   const lines: string[] = [];

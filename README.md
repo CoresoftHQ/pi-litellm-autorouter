@@ -247,6 +247,32 @@ produced this one; a "thanks" (after the third turn) counts for it. Posteriors p
 `~/.pi/agent/autorouter-adaptive.json`; rows for models no longer in any pool are dropped on load. Inspect
 them with `/autoroute adaptive`, and see how the last pick was scored with `/autoroute explain`.
 
+### Decision log
+
+On by default. Every routing decision prints one line in the shape of upstream's
+[decision log](https://docs.litellm.ai/docs/proxy/auto_routing#decision-log), so `cause=` searches work the same
+against pi's console and a LiteLLM proxy log:
+
+```
+autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-4-5
+autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5, thinking=high, keyword="migration"
+autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
+autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low
+```
+
+pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallback`, the adaptive phase under
+`signals`) appear only when set, after upstream's fields.
+
+- **Interactive mode**: the line is drawn dimly in the chat, just above the prompt it routed. It is a rendering
+  of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
+  model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
+  the full breakdown `/autoroute explain` would show.
+- **`pi -p` / RPC**: the line goes to **stderr**, keeping stdout clean for the agent's output.
+- `/autoroute log [n]` replays the session's decisions (or the last `n`) on demand.
+- `"decisionLog": false` silences both; decisions are still recorded and `/autoroute log` still works.
+
 ## Useful commands
 
 | Command | Purpose |
@@ -254,6 +280,7 @@ them with `/autoroute adaptive`, and see how the last pick was scored with `/aut
 | `/autoroute` | Show current classifier, last decision, tier, and score |
 | `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach |
 | `/autoroute explain` | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
+| `/autoroute log [n]` | Replay the session's routing decisions as log lines |
 | `/autoroute adaptive` | The bandit's learned posteriors per request type and model |
 | `/autoroute next <model>` | Force a model for the next prompt only |
 | `/autoroute pin <model>` | Freeze on one model until unpinned |

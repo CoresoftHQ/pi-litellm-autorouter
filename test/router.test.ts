@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildConfig } from "../src/config.ts";
 import { route } from "../src/router.ts";
+import { decisionLogLine } from "../src/decision.ts";
 import type { ExtractedTurn } from "../src/types.ts";
 import { type ModelApplier, candidatesForTier } from "../src/resolve.ts";
 
@@ -553,5 +554,36 @@ describe("candidatesForTier — upstream's get_model_for_tier", () => {
     const high = await route({ turn: turn("hi"), config, api, now, rng: () => 0.9 });
     expect(low.decision.chosenModel).toBe("a/haiku");
     expect(high.decision.chosenModel).toBe("a/mini");
+  });
+});
+
+describe("decisionLogLine", () => {
+  it("mirrors upstream's greppable shape and adds pi's extras only when set", async () => {
+    const plain = await route({ turn: turn("hi"), config: config(), api: applier(), now });
+    expect(decisionLogLine(plain.decision)).toBe(
+      `autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=${plain.decision.score!.toFixed(3)}, ` +
+        `signals=[${plain.decision.signals.join(", ")}], routed_model=anthropic/haiku`,
+    );
+
+    const pinned = await route({
+      turn: turn("hi"),
+      config: config({ sessionAffinity: true }),
+      api: applier(),
+      now,
+      pin: { model: "anthropic/opus", tier: "REASONING", expiresAt: now() + 1 },
+    });
+    expect(decisionLogLine(pinned.decision)).toBe(
+      "autoroute: routing decision cause=session_affinity_pin, tier=REASONING, routed_model=anthropic/opus",
+    );
+
+    const keyword = await route({
+      turn: turn("fix the typo PI ESCALATE"),
+      config: config({ keywordTierRules: [{ keywords: ["typo"], tier: "SIMPLE" }] }),
+      api: applier(),
+      now,
+    });
+    expect(decisionLogLine(keyword.decision)).toBe(
+      'autoroute: routing decision cause=literal_keyword_match, tier=MEDIUM, routed_model=anthropic/sonnet, keyword="typo", escalated=true',
+    );
   });
 });

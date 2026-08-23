@@ -106,6 +106,9 @@ export interface RouterConfig {
   matchThreshold: number;
   /** pi has no embeddings API, so the call is made directly; this is where it goes. */
   embeddingEndpoint: EmbeddingEndpointConfig;
+  /** Print one `cause=...` line per routing decision to the console (the chat in
+   *  interactive mode, stderr otherwise). Decisions are recorded either way. */
+  decisionLog: boolean;
 }
 
 export interface EmbeddingEndpointConfig {
@@ -179,6 +182,7 @@ export function defaultConfig(): RouterConfig {
     embeddingModel: null,
     matchThreshold: DEFAULT_MATCH_THRESHOLD,
     embeddingEndpoint: { timeoutMs: DEFAULT_CLASSIFIER_TIMEOUT_MS },
+    decisionLog: true,
   };
 }
 
@@ -576,6 +580,14 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
           errors.push("embeddingEndpoint.timeoutMs must be a positive number");
         }
       }
+    }
+  }
+
+  if (raw.decisionLog !== undefined) {
+    if (typeof raw.decisionLog === "boolean") {
+      config.decisionLog = raw.decisionLog;
+    } else {
+      errors.push("decisionLog must be a boolean");
     }
   }
 
