@@ -34,7 +34,7 @@ Each user prompt goes through: **extract → classify → override → select �
    `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
-4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick, as upstream), or,
+4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or,
    with `adaptive: true`,
    a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
    classified tier. See [Adaptive selection](#adaptive-selection).
@@ -56,12 +56,6 @@ pi install npm:@coresofthq/pi-litellm-autorouter
 `/autoroute init` reads the models pi can reach, ranks them by price, and writes a starter config to
 `~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override). Edit the tiers from
 there - price is only a proxy for capability, not the same thing.
-
-Once it behaves, drop `-e` and point `settings.json` at the clone instead, so `/reload` picks up changes:
-
-```json
-{ "extensions": ["/path/to/pi-litellm-autorouter/src/index.ts"] }
-```
 
 ### The minimum config
 
@@ -351,6 +345,21 @@ Your `autorouter.json` is left untouched by all of these, so re-enabling picks u
 npm run check      # tsc --noEmit && vitest run
 npm test           # vitest run
 ```
+
+## Changelog
+### 1.1.0
+This version is all about upstream feature parity.
+
+* Decision log: The extension now writes what model was selected and why
+* Custom Technical Keywords: Append to the built in technical keywords list
+* Adaptive Mode: Pick tier/model from a configured pool
+* Semantic Keyword Matching: Use an embedding model to determine keyword matches for tier selection.
+
+### 1.0.2
+* Removed proxy strategy, only local makes sense. if using external LiteLLM, just disable the extension.
+
+### 1.0.1
+* Initial NPM release
 
 ## Prior art
 
