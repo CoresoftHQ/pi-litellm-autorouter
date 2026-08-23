@@ -111,6 +111,24 @@ describe("buildConfig", () => {
     expect(config.escalationKeywords).toEqual([]);
   });
 
+  it("appends customTechnicalKeywords, trimming blanks", () => {
+    const { config, errors } = buildConfig([{ ...base, customTechnicalKeywords: [" kafka ", "", "udp"] }]);
+    expect(errors).toEqual([]);
+    expect(config.customTechnicalKeywords).toEqual(["kafka", "udp"]);
+  });
+
+  it("rejects a non-list customTechnicalKeywords", () => {
+    const { errors } = buildConfig([{ ...base, customTechnicalKeywords: "kafka" }]);
+    expect(errors).toEqual(["customTechnicalKeywords must be an array of strings"]);
+  });
+
+  it("refuses to let technicalKeywords replace the built-in list", () => {
+    const { config, errors } = buildConfig([{ ...base, technicalKeywords: ["quantum"] }]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/customTechnicalKeywords/);
+    expect(config.enabled).toBe(false);
+  });
+
   it("errors when there is nothing to route to", () => {
     const { errors } = buildConfig([{ tiers: {} }]);
     expect(errors.join()).toContain("nothing to route to");

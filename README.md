@@ -142,6 +142,26 @@ can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` acc
 configures the LLM classifier in one go. There's no separate command to flip classifier mode afterwards;
 re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in the config file.
 
+## Options
+
+All keys go in the same `autorouter.json`. Names are the camelCase spelling of LiteLLM's
+`complexity_router_config` keys, so a config can move between the two systems.
+
+### Domain keywords for the heuristic scorer
+
+The scorer's `technicalTerms` dimension counts hits against a built-in list of ~80 terms. That list is
+calibrated against the dimension's thresholds and **cannot be replaced** (a `technicalKeywords` key is
+rejected), but it can be extended:
+
+```json
+{
+  "customTechnicalKeywords": ["kafka", "redis", "postgresql", "udp", "dns"]
+}
+```
+
+Entries are appended in order and deduplicated case-insensitively against the built-in list, so listing
+`"TCP"` when `"tcp"` is already built in changes nothing. Mirrors upstream's `custom_technical_keywords`.
+
 ## Useful commands
 
 | Command | Purpose |

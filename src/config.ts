@@ -57,8 +57,11 @@ export interface RouterConfig {
   reasoningOverrideMinScore: number | null;
   codeKeywords?: string[];
   reasoningKeywords?: string[];
-  technicalKeywords?: string[];
   simpleKeywords?: string[];
+  /** Domain terms appended to the built-in technical keyword list. The built-in list
+   *  itself is not overridable: it is calibrated against the scorer's thresholds, and a
+   *  replacement list that drops the common terms would silently move every tier decision. */
+  customTechnicalKeywords: string[];
   classifierType: ClassifierType;
   classifierLLMConfig: ClassifierLLMConfig | null;
   classifierFallback: ClassifierFallback;
@@ -100,6 +103,7 @@ export function defaultConfig(): RouterConfig {
     tokenThresholds: { ...DEFAULT_TOKEN_THRESHOLDS },
     dimensionWeights: { ...DEFAULT_DIMENSION_WEIGHTS },
     reasoningOverrideMinScore: null,
+    customTechnicalKeywords: [],
     classifierType: "heuristic",
     classifierLLMConfig: null,
     classifierFallback: "heuristic",
@@ -208,7 +212,7 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     config.reasoningOverrideMinScore = raw.reasoningOverrideMinScore;
   }
 
-  for (const key of ["codeKeywords", "reasoningKeywords", "technicalKeywords", "simpleKeywords"] as const) {
+  for (const key of ["codeKeywords", "reasoningKeywords", "simpleKeywords"] as const) {
     const value = raw[key];
     if (value === undefined) continue;
     if (!Array.isArray(value) || value.some((k) => typeof k !== "string")) {
@@ -216,6 +220,24 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
       continue;
     }
     config[key] = value as string[];
+  }
+
+  // The built-in technical list is append-only. Upstream lets `technical_keywords` replace
+  // it; here that is refused outright rather than ignored, because a key that reads as "my
+  // technical keywords" but changes nothing would be worse than one that fails loudly.
+  if (raw.technicalKeywords !== undefined) {
+    errors.push(
+      "technicalKeywords cannot be overridden; use customTechnicalKeywords to append domain terms " +
+        "to the built-in list",
+    );
+  }
+  if (raw.customTechnicalKeywords !== undefined) {
+    const value = raw.customTechnicalKeywords;
+    if (!Array.isArray(value) || value.some((k) => typeof k !== "string")) {
+      errors.push("customTechnicalKeywords must be an array of strings");
+    } else {
+      config.customTechnicalKeywords = (value as string[]).map((k) => k.trim()).filter((k) => k.length > 0);
+    }
   }
 
   if (raw.classifierType !== undefined) {
