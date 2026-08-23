@@ -177,6 +177,61 @@ describe("buildConfig", () => {
     expect(errors).toEqual(["adaptive requires at least one non-empty tier pool"]);
   });
 
+  it("parses the semantic matching knobs", () => {
+    const { config, errors } = buildConfig([
+      {
+        ...base,
+        keywordTierRules: [{ keywords: ["migration"], tier: "REASONING" }],
+        semanticKeywordMatching: true,
+        embeddingModel: " voyage/voyage-3-5 ",
+        matchThreshold: 0.6,
+        embeddingEndpoint: { baseUrl: "https://proxy.example/v1", apiKeyEnv: "EMBED_KEY", timeoutMs: 1500.9 },
+      },
+    ]);
+    expect(errors).toEqual([]);
+    expect(config.semanticKeywordMatching).toBe(true);
+    expect(config.embeddingModel).toBe("voyage/voyage-3-5");
+    expect(config.matchThreshold).toBe(0.6);
+    expect(config.embeddingEndpoint).toEqual({ baseUrl: "https://proxy.example/v1", apiKeyEnv: "EMBED_KEY", timeoutMs: 1500 });
+  });
+
+  it("defaults the match threshold and embedding timeout", () => {
+    const { config } = buildConfig([base]);
+    expect(config.semanticKeywordMatching).toBe(false);
+    expect(config.embeddingModel).toBeNull();
+    expect(config.matchThreshold).toBe(0.5);
+    expect(config.embeddingEndpoint).toEqual({ timeoutMs: 3000 });
+  });
+
+  it("requires an embedding model and rules for semantic matching", () => {
+    expect(buildConfig([{ ...base, semanticKeywordMatching: true }]).errors).toEqual([
+      "embeddingModel is required when semanticKeywordMatching is enabled",
+      "keywordTierRules must be non-empty when semanticKeywordMatching is enabled",
+    ]);
+    // Off, neither is needed.
+    expect(buildConfig([{ ...base, semanticKeywordMatching: false }]).errors).toEqual([]);
+  });
+
+  it("rejects bad semantic values", () => {
+    const { errors } = buildConfig([
+      {
+        ...base,
+        semanticKeywordMatching: "yes",
+        embeddingModel: "",
+        matchThreshold: 1.5,
+        embeddingEndpoint: { baseUrl: "", apiKeyEnv: 3, timeoutMs: 0 },
+      },
+    ]);
+    expect(errors).toEqual([
+      "semanticKeywordMatching must be a boolean",
+      "embeddingModel must be a model string (provider/model-id)",
+      "matchThreshold must be a number in [0, 1]",
+      "embeddingEndpoint.baseUrl must be a non-empty string",
+      "embeddingEndpoint.apiKeyEnv must be a non-empty string",
+      "embeddingEndpoint.timeoutMs must be a positive number",
+    ]);
+  });
+
   it("errors when there is nothing to route to", () => {
     const { errors } = buildConfig([{ tiers: {} }]);
     expect(errors.join()).toContain("nothing to route to");

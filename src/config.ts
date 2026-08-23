@@ -92,7 +92,25 @@ export interface RouterConfig {
   /** `all` scores every pool model with the distance penalty (soft floors);
    *  `classified_tier` samples only inside the classified tier's pool. */
   adaptiveEligible: AdaptiveEligible;
+  /** Match `keywordTierRules` by embedding similarity instead of literal text. */
+  semanticKeywordMatching: boolean;
+  /** `provider/model-id` of the embedding model; required when semantic matching is on. */
+  embeddingModel: ModelRef | null;
+  /** Minimum cosine similarity for a semantic match. */
+  matchThreshold: number;
+  /** pi has no embeddings API, so the call is made directly; this is where it goes. */
+  embeddingEndpoint: EmbeddingEndpointConfig;
 }
+
+export interface EmbeddingEndpointConfig {
+  /** Overrides the base URL pi knows for the provider (or the built-in host table). */
+  baseUrl?: string;
+  /** Environment variable holding the API key; overrides pi's key for the provider. */
+  apiKeyEnv?: string;
+  timeoutMs: number;
+}
+
+export const DEFAULT_MATCH_THRESHOLD = 0.5;
 
 export interface AdaptiveWeights {
   quality: number;
@@ -150,6 +168,10 @@ export function defaultConfig(): RouterConfig {
     adaptiveWeights: { ...DEFAULT_ADAPTIVE_WEIGHTS },
     tierDistancePenalty: DEFAULT_TIER_DISTANCE_PENALTY,
     adaptiveEligible: "all",
+    semanticKeywordMatching: false,
+    embeddingModel: null,
+    matchThreshold: DEFAULT_MATCH_THRESHOLD,
+    embeddingEndpoint: { timeoutMs: DEFAULT_CLASSIFIER_TIMEOUT_MS },
   };
 }
 
@@ -477,6 +499,60 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     }
   }
 
+  if (raw.semanticKeywordMatching !== undefined) {
+    if (typeof raw.semanticKeywordMatching === "boolean") {
+      config.semanticKeywordMatching = raw.semanticKeywordMatching;
+    } else {
+      errors.push("semanticKeywordMatching must be a boolean");
+    }
+  }
+
+  if (raw.embeddingModel !== undefined) {
+    if (typeof raw.embeddingModel === "string" && raw.embeddingModel.trim()) {
+      config.embeddingModel = raw.embeddingModel.trim();
+    } else {
+      errors.push("embeddingModel must be a model string (provider/model-id)");
+    }
+  }
+
+  if (raw.matchThreshold !== undefined) {
+    const value = raw.matchThreshold;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1) {
+      config.matchThreshold = value;
+    } else {
+      errors.push("matchThreshold must be a number in [0, 1]");
+    }
+  }
+
+  if (raw.embeddingEndpoint !== undefined) {
+    const value = raw.embeddingEndpoint;
+    if (!isRecord(value)) {
+      errors.push("embeddingEndpoint must be an object { baseUrl, apiKeyEnv, timeoutMs }");
+    } else {
+      if (value.baseUrl !== undefined) {
+        if (typeof value.baseUrl === "string" && value.baseUrl.trim()) {
+          config.embeddingEndpoint.baseUrl = value.baseUrl.trim();
+        } else {
+          errors.push("embeddingEndpoint.baseUrl must be a non-empty string");
+        }
+      }
+      if (value.apiKeyEnv !== undefined) {
+        if (typeof value.apiKeyEnv === "string" && value.apiKeyEnv.trim()) {
+          config.embeddingEndpoint.apiKeyEnv = value.apiKeyEnv.trim();
+        } else {
+          errors.push("embeddingEndpoint.apiKeyEnv must be a non-empty string");
+        }
+      }
+      if (value.timeoutMs !== undefined) {
+        if (typeof value.timeoutMs === "number" && value.timeoutMs > 0) {
+          config.embeddingEndpoint.timeoutMs = Math.floor(value.timeoutMs);
+        } else {
+          errors.push("embeddingEndpoint.timeoutMs must be a positive number");
+        }
+      }
+    }
+  }
+
   if (raw.reminderMarkers !== undefined) {
     if (!Array.isArray(raw.reminderMarkers) || raw.reminderMarkers.length === 0) {
       errors.push("reminderMarkers must be a non-empty array of { open, close } pairs");
@@ -510,6 +586,17 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   for (const tier of TIER_SEVERITY_ORDER) {
     if (config.tiers[tier].length === 0 && configuredTiers.length > 0) {
       warnings.push(`tiers.${tier} has no models; requests classified there fall back to the next candidate`);
+    }
+  }
+
+  if (config.semanticKeywordMatching) {
+    // Both upstream rules: there is nothing to embed the prompt against without a model,
+    // and nothing to match it to without rules.
+    if (!config.embeddingModel) {
+      errors.push("embeddingModel is required when semanticKeywordMatching is enabled");
+    }
+    if (config.keywordTierRules.length === 0) {
+      errors.push("keywordTierRules must be non-empty when semanticKeywordMatching is enabled");
     }
   }
 

@@ -7,11 +7,55 @@
 
 import type { KeywordTierRule, RouterConfig } from "../config.ts";
 import { keywordMatches } from "./heuristic.ts";
-import { TIER_SEVERITY_ORDER, type Tier, tierSeverity } from "../types.ts";
+import type { SemanticMatcher } from "./semantic.ts";
+import { type DecisionCause, TIER_SEVERITY_ORDER, type Tier, tierSeverity } from "../types.ts";
 
 export interface KeywordOverride {
   tier: Tier;
-  matchedKeyword: string;
+  /** Null on a semantic hit: that is a similarity match against the rule's keywords, not
+   *  a literal one, so there is no single keyword to report. */
+  matchedKeyword: string | null;
+  cause: Extract<DecisionCause, "literal_keyword_match" | "semantic_keyword_match">;
+  /** Extra detail for the decision log, e.g. the nearest keyword of a semantic hit. */
+  signal?: string;
+}
+
+export type KeywordOverrideResult =
+  | { override: KeywordOverride | null; failure?: undefined }
+  | { override: null; failure: string };
+
+/**
+ * Resolve a `keywordTierRules` override, semantically or lexically per config.
+ *
+ * Mirrors upstream's `_resolve_keyword_tier_override`: with semantic matching on, the
+ * lexical matcher is *not* consulted — and an embedding failure yields no override, so
+ * the prompt falls through to the scorer rather than failing. The failure is reported so
+ * the decision can record it.
+ */
+export async function resolveKeywordTierOverride(
+  userMessage: string,
+  config: RouterConfig,
+  semantic: SemanticMatcher | null | undefined,
+): Promise<KeywordOverrideResult> {
+  if (config.keywordTierRules.length === 0) return { override: null };
+  if (!config.semanticKeywordMatching) {
+    return { override: lexicalTierOverride(userMessage, config.keywordTierRules) };
+  }
+  if (!semantic) return { override: null, failure: "semantic matcher unavailable" };
+  try {
+    const match = await semantic.match(userMessage);
+    if (!match) return { override: null };
+    return {
+      override: {
+        tier: match.tier,
+        matchedKeyword: null,
+        cause: "semantic_keyword_match",
+        signal: `semantic_match (${match.score.toFixed(2)} ≈ "${match.nearestKeyword}")`,
+      },
+    };
+  } catch (err) {
+    return { override: null, failure: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /**
@@ -32,7 +76,7 @@ export function lexicalTierOverride(
     for (const keyword of rule.keywords) {
       if (!keywordMatches(text, keyword)) continue;
       if (!best || tierSeverity(rule.tier) > tierSeverity(best.tier)) {
-        best = { tier: rule.tier, matchedKeyword: keyword };
+        best = { tier: rule.tier, matchedKeyword: keyword, cause: "literal_keyword_match" };
       }
       break; // one match is enough to apply this rule
     }

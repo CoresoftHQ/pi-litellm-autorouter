@@ -22,9 +22,10 @@ import {
   applyFloor,
   escalateTier,
   floorIsTopConfiguredTier,
-  lexicalTierOverride,
   matchedEscalationKeyword,
+  resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
+import type { SemanticMatcher } from "./classify/semantic.ts";
 import { type ModelApplier, applyFirstUsable, candidatesForTier } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
@@ -55,6 +56,9 @@ export interface RouteInput {
   /** The bandit state, when `config.adaptive` is on. Without it routing degrades to the
    *  first-usable pool walk rather than failing. */
   adaptive?: AdaptiveRouter | null;
+  /** The embedding matcher, when `config.semanticKeywordMatching` is on. Without it the
+   *  rules are skipped and the prompt is scored, as on any embedding failure. */
+  semantic?: SemanticMatcher | null;
 }
 
 export interface RouteOutput {
@@ -251,7 +255,15 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   }
 
   // ── 3. Keyword tier rules ──────────────────────────────────────────────────
-  const override = lexicalTierOverride(turn.currentAsk, config.keywordTierRules);
+  const { override, failure: overrideFailure } = await resolveKeywordTierOverride(
+    turn.currentAsk,
+    config,
+    input.semantic,
+  );
+  if (overrideFailure) {
+    // Upstream logs and falls through to the scorer; here the decision carries the reason.
+    decision.signals = [...decision.signals, `semantic_keyword_match_failed (${overrideFailure})`];
+  }
   if (override) {
     let tier = override.tier;
     if (escalationKeyword) {
@@ -261,8 +273,9 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     const beforeFloor = tier;
     tier = applyFloor(tier, planFloor);
     decision.planFloored = tier !== beforeFloor;
-    decision.cause = decision.planFloored ? "plan_mode" : "literal_keyword_match";
+    decision.cause = decision.planFloored ? "plan_mode" : override.cause;
     decision.matchedKeyword = decision.planFloored ? planSentinel : override.matchedKeyword;
+    if (override.signal) decision.signals = [...decision.signals, override.signal];
     return finish(tier, null);
   }
 
@@ -271,7 +284,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
 
   if ("failed" in classification) {
     decision.cause = "default_model_fallback";
-    decision.signals = [classification.failed];
+    decision.signals = [...decision.signals, classification.failed];
     // A sentinel-carrying request skips this exit: defaultModel carries no tier guarantee,
     // so a plan-mode request must land in the floor's pool, which is the only destination
     // the floor can vouch for.
@@ -284,7 +297,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   }
 
   decision.score = classification.score ?? null;
-  decision.signals = classification.signals;
+  decision.signals = [...decision.signals, ...classification.signals];
   decision.cause = classification.cause;
 
   let tier = classification.tier;

@@ -31,7 +31,7 @@ Each user prompt goes through: **extract → classify → override → select �
      to agent traffic.
 3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
    escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
-   `keyword_tier_rules` (deterministic keyword → tier), and a plan-mode floor (routes at least to a
+   `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
 4. **Select** - a tier maps to one model or a pool of models (first usable wins), or, with `adaptive: true`,
@@ -162,6 +162,39 @@ rejected), but it can be extended:
 
 Entries are appended in order and deduplicated case-insensitively against the built-in list, so listing
 `"TCP"` when `"tcp"` is already built in changes nothing. Mirrors upstream's `custom_technical_keywords`.
+
+### Semantic keyword matching
+
+By default `keywordTierRules` match literally (word-bounded, case-insensitive). With
+`semanticKeywordMatching: true` they match by embedding similarity instead, so a paraphrase with no keyword
+in it ("help me roll out my k8s cluster") still hits a rule for `"kubernetes deployment"`. Port of upstream's
+`semantic_keyword_matching` / `embedding_model` / `match_threshold`.
+
+```json
+{
+  "keywordTierRules": [
+    { "keywords": ["kubernetes deployment", "container orchestration"], "tier": "REASONING" },
+    { "keywords": ["hello", "thanks"], "tier": "SIMPLE" }
+  ],
+  "semanticKeywordMatching": true,
+  "embeddingModel": "voyage/voyage-3-5",
+  "matchThreshold": 0.5,
+  "embeddingEndpoint": { "apiKeyEnv": "VOYAGE_API_KEY", "timeoutMs": 3000 }
+}
+```
+
+- One route per tier, that tier's keywords as its utterances, `max` aggregation: a prompt matches a tier when
+  it is close to *any* of the tier's keywords, and the closest tier wins if its similarity is at least
+  `matchThreshold`. Keywords are embedded once per session; only the prompt is embedded per turn.
+- With semantic matching on, literal matching is **not** consulted (as upstream). An embedding failure -
+  timeout, bad key, endpoint down - yields no override and the prompt falls through to the classifier; the
+  decision records why under `signals`.
+- pi has no embeddings API, so the call goes straight to an OpenAI-compatible `/embeddings` endpoint.
+  `embeddingModel` is `provider/model-id`; the base URL comes from `embeddingEndpoint.baseUrl`, else the provider
+  pi knows by that name, else a built-in table (`voyage`, `openai`, `mistral`, `openrouter`, `together`,
+  `fireworks`, `google`). The key comes from `embeddingEndpoint.apiKeyEnv`, else pi's key for the provider,
+  else `<PROVIDER>_API_KEY`.
+- Requires `embeddingModel` and at least one rule; `matchThreshold` is in `[0, 1]`.
 
 ### Adaptive selection
 

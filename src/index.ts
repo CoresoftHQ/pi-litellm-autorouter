@@ -20,6 +20,7 @@ import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { defaultAdaptiveStorePath, readPersistedCells, writePersistedCells } from "./adaptive/store.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
 import { splitModelRef } from "./classify/llm.ts";
+import { type SemanticMatcher, buildSemanticMatcher } from "./classify/semantic.ts";
 import {
   type AutorouteState,
   DECISION_ENTRY_TYPE,
@@ -48,6 +49,7 @@ export default function autorouter(pi: ExtensionAPI): void {
   let lastRoutedAsk: string | null = null;
   let adaptive: AdaptiveRouter | null = null;
   const adaptiveStorePath = defaultAdaptiveStorePath();
+  let semantic: SemanticMatcher | null = null;
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
@@ -113,6 +115,12 @@ export default function autorouter(pi: ExtensionAPI): void {
     if (adaptive) adaptive.load(readPersistedCells(adaptiveStorePath));
   };
 
+  /** The semantic matcher embeds the rule keywords lazily, on the first prompt that
+   *  needs them, so building it here costs nothing until routing does. */
+  const rebuildSemantic = (ctx: ExtensionContext): void => {
+    semantic = config ? buildSemanticMatcher(config, { registry: ctx.modelRegistry }) : null;
+  };
+
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
     if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
@@ -129,6 +137,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configSources = loaded.sources;
     restoreState(ctx);
     rebuildAdaptive(ctx);
+    rebuildSemantic(ctx);
     try {
       availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
     } catch {
@@ -214,6 +223,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         oneShot,
         callerSystemPrompt: undefined,
         adaptive,
+        semantic,
       });
 
       applyingOwnModel = false;
@@ -333,6 +343,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configErrors = loaded.errors;
     configSources = loaded.sources;
     rebuildAdaptive(ctx);
+    rebuildSemantic(ctx);
 
     ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
   };
@@ -465,6 +476,9 @@ export default function autorouter(pi: ExtensionAPI): void {
               lines.push(
                 `adaptive: on (${config.adaptiveEligible}, quality ${config.adaptiveWeights.quality} / cost ${config.adaptiveWeights.cost}, penalty ${config.tierDistancePenalty})`,
               );
+            }
+            if (config.semanticKeywordMatching) {
+              lines.push(`keywords: semantic (${config.embeddingModel}, threshold ${config.matchThreshold})`);
             }
           }
           if (configSources.length > 0) lines.push(`config:   ${configSources.join(", ")}`);

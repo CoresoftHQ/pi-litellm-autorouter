@@ -625,3 +625,83 @@ describe("adaptive wiring", () => {
     expect(existsSync(join(home, ".pi", "agent", "autorouter-adaptive.json"))).toBe(false);
   });
 });
+
+describe("semantic keyword matching wiring", () => {
+  let dir: string;
+  let home: string;
+  let originalHome: string | undefined;
+  let originalFetch: typeof fetch;
+
+  const SEMANTIC_CONFIG = {
+    ...CONFIG,
+    keywordTierRules: [{ keywords: ["kubernetes deployment"], tier: "REASONING" }],
+    semanticKeywordMatching: true,
+    embeddingModel: "voyage/voyage-3-5",
+    embeddingEndpoint: { apiKeyEnv: "TEST_EMBED_KEY" },
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+    home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(SEMANTIC_CONFIG));
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+    process.env.TEST_EMBED_KEY = "k";
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    delete process.env.TEST_EMBED_KEY;
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("embeds the rule keywords and the prompt, and routes on similarity", async () => {
+    const calls: { url: string; body: { model: string; input: string[] } }[] = [];
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { model: string; input: string[] };
+      calls.push({ url, body });
+      // Every input maps to the same direction: the prompt is a perfect match.
+      return new Response(JSON.stringify({ data: body.input.map((_, index) => ({ index, embedding: [1, 0] })) }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "help me roll out my k8s cluster", source: "interactive" }, ctx);
+
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://api.voyageai.com/v1/embeddings",
+      "https://api.voyageai.com/v1/embeddings",
+    ]);
+    expect(calls[0]?.body).toEqual({ model: "voyage-3-5", input: ["kubernetes deployment"] });
+    expect(calls[1]?.body.input).toEqual(["help me roll out my k8s cluster"]);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.cause).toBe("semantic_keyword_match");
+    expect(decision.chosenModel).toBe("anthropic/opus");
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+
+    await m.commands.get("autoroute")!.handler("", ctx);
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("keywords: semantic (voyage/voyage-3-5"), "info");
+  });
+
+  it("still routes when the embeddings endpoint is down", async () => {
+    globalThis.fetch = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.cause).toBe("heuristic_scorer");
+    expect(decision.signals).toContainEqual(expect.stringMatching(/semantic_keyword_match_failed .*503/));
+    expect(m.setModelCalls).toEqual(["anthropic/haiku"]);
+  });
+});
