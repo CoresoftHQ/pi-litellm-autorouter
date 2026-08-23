@@ -23,7 +23,19 @@ import {
   DEFAULT_TIER_BOUNDARIES,
   DEFAULT_TOKEN_THRESHOLDS,
 } from "./defaults.ts";
-import { type ModelRef, type Tier, type TierTarget, TIER_SEVERITY_ORDER, isTier } from "./types.ts";
+import {
+  type ModelRef,
+  type RequestType,
+  REQUEST_TYPES,
+  THINKING_LEVELS,
+  type ThinkingLevel,
+  type Tier,
+  type TierTarget,
+  TIER_SEVERITY_ORDER,
+  isRequestType,
+  isThinkingLevel,
+  isTier,
+} from "./types.ts";
 
 export type ClassifierType = "heuristic" | "llm";
 export type ClassifierFallback = "heuristic" | "default_model";
@@ -50,6 +62,9 @@ export interface ClassifierLLMConfig {
 export interface RouterConfig {
   enabled: boolean;
   defaultModel: ModelRef | null;
+  /** Applied alongside `defaultModel` whenever it is the model chosen. Set by writing
+   *  `defaultModel` as `{ model, thinkingLevel }`, the same shape as a tier entry. */
+  defaultModelThinkingLevel: ThinkingLevel | null;
   tiers: Record<Tier, TierTarget[]>;
   tierBoundaries: Record<string, number>;
   tokenThresholds: Record<string, number>;
@@ -57,8 +72,11 @@ export interface RouterConfig {
   reasoningOverrideMinScore: number | null;
   codeKeywords?: string[];
   reasoningKeywords?: string[];
-  technicalKeywords?: string[];
   simpleKeywords?: string[];
+  /** Domain terms appended to the built-in technical keyword list. The built-in list
+   *  itself is not overridable: it is calibrated against the scorer's thresholds, and a
+   *  replacement list that drops the common terms would silently move every tier decision. */
+  customTechnicalKeywords: string[];
   classifierType: ClassifierType;
   classifierLLMConfig: ClassifierLLMConfig | null;
   classifierFallback: ClassifierFallback;
@@ -72,7 +90,48 @@ export interface RouterConfig {
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
   reminderMarkers: ReminderMarkerPair[];
+  /** Thompson-sample within/across the tier pools instead of taking the first usable model. */
+  adaptive: boolean;
+  adaptiveWeights: AdaptiveWeights;
+  /** Score penalty per tier-step between a candidate's home tier and the classified tier. */
+  tierDistancePenalty: number;
+  /** `all` scores every pool model with the distance penalty (soft floors);
+   *  `classified_tier` samples only inside the classified tier's pool. */
+  adaptiveEligible: AdaptiveEligible;
+  /** Match `keywordTierRules` by embedding similarity instead of literal text. */
+  semanticKeywordMatching: boolean;
+  /** `provider/model-id` of the embedding model; required when semantic matching is on. */
+  embeddingModel: ModelRef | null;
+  /** Minimum cosine similarity for a semantic match. */
+  matchThreshold: number;
+  /** pi has no embeddings API, so the call is made directly; this is where it goes. */
+  embeddingEndpoint: EmbeddingEndpointConfig;
+  /** Print one `cause=...` line per routing decision to the console (the chat in
+   *  interactive mode, stderr otherwise). Decisions are recorded either way. */
+  decisionLog: boolean;
 }
+
+export interface EmbeddingEndpointConfig {
+  /** Overrides the base URL pi knows for the provider (or the built-in host table). */
+  baseUrl?: string;
+  /** Environment variable holding the API key; overrides pi's key for the provider. */
+  apiKeyEnv?: string;
+  timeoutMs: number;
+}
+
+export const DEFAULT_MATCH_THRESHOLD = 0.5;
+
+export interface AdaptiveWeights {
+  quality: number;
+  cost: number;
+}
+
+export type AdaptiveEligible = "all" | "classified_tier";
+
+/** Upstream's complexity-router default leans on cost; the standalone adaptive router
+ *  defaults the other way (0.7 / 0.3), but this is a port of the complexity router. */
+export const DEFAULT_ADAPTIVE_WEIGHTS: Readonly<AdaptiveWeights> = { quality: 0.3, cost: 0.7 };
+export const DEFAULT_TIER_DISTANCE_PENALTY = 0.5;
 
 export interface LoadedConfig {
   config: RouterConfig;
@@ -95,11 +154,13 @@ export function defaultConfig(): RouterConfig {
   return {
     enabled: true,
     defaultModel: null,
+    defaultModelThinkingLevel: null,
     tiers: { ...EMPTY_TIERS },
     tierBoundaries: { ...DEFAULT_TIER_BOUNDARIES },
     tokenThresholds: { ...DEFAULT_TOKEN_THRESHOLDS },
     dimensionWeights: { ...DEFAULT_DIMENSION_WEIGHTS },
     reasoningOverrideMinScore: null,
+    customTechnicalKeywords: [],
     classifierType: "heuristic",
     classifierLLMConfig: null,
     classifierFallback: "heuristic",
@@ -113,6 +174,15 @@ export function defaultConfig(): RouterConfig {
     sessionAffinity: false,
     sessionAffinityTtlSeconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
     reminderMarkers: DEFAULT_REMINDER_MARKERS.map((m) => ({ ...m })),
+    adaptive: false,
+    adaptiveWeights: { ...DEFAULT_ADAPTIVE_WEIGHTS },
+    tierDistancePenalty: DEFAULT_TIER_DISTANCE_PENALTY,
+    adaptiveEligible: "all",
+    semanticKeywordMatching: false,
+    embeddingModel: null,
+    matchThreshold: DEFAULT_MATCH_THRESHOLD,
+    embeddingEndpoint: { timeoutMs: DEFAULT_CLASSIFIER_TIMEOUT_MS },
+    decisionLog: true,
   };
 }
 
@@ -132,8 +202,26 @@ function parseTierTargets(raw: unknown, tier: string, errors: string[]): TierTar
     }
     if (isRecord(entry) && typeof entry.model === "string" && entry.model.trim()) {
       const target: TierTarget = { model: entry.model.trim() };
-      if (typeof entry.thinkingLevel === "string") {
-        target.thinkingLevel = entry.thinkingLevel as TierTarget["thinkingLevel"];
+      if (entry.thinkingLevel !== undefined) {
+        if (isThinkingLevel(entry.thinkingLevel)) {
+          target.thinkingLevel = entry.thinkingLevel;
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
+        }
+      }
+      if (entry.qualityTier !== undefined) {
+        if (entry.qualityTier === 1 || entry.qualityTier === 2 || entry.qualityTier === 3) {
+          target.qualityTier = entry.qualityTier;
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" qualityTier must be 1, 2 or 3`);
+        }
+      }
+      if (entry.strengths !== undefined) {
+        if (Array.isArray(entry.strengths) && entry.strengths.every(isRequestType)) {
+          target.strengths = entry.strengths as RequestType[];
+        } else {
+          errors.push(`tiers.${tier}: "${target.model}" strengths must be a list of ${REQUEST_TYPES.join(", ")}`);
+        }
       }
       targets.push(target);
       continue;
@@ -166,8 +254,23 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
 
   if (typeof raw.enabled === "boolean") config.enabled = raw.enabled;
 
-  if (typeof raw.defaultModel === "string" && raw.defaultModel.trim()) {
-    config.defaultModel = raw.defaultModel.trim();
+  if (raw.defaultModel !== undefined) {
+    // Same shape as a tier entry: a model string, or { model, thinkingLevel }.
+    const value = raw.defaultModel;
+    if (typeof value === "string" && value.trim()) {
+      config.defaultModel = value.trim();
+    } else if (isRecord(value) && typeof value.model === "string" && value.model.trim()) {
+      config.defaultModel = value.model.trim();
+      if (value.thinkingLevel !== undefined) {
+        if (isThinkingLevel(value.thinkingLevel)) {
+          config.defaultModelThinkingLevel = value.thinkingLevel;
+        } else {
+          errors.push(`defaultModel.thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
+        }
+      }
+    } else {
+      errors.push("defaultModel must be a model string or { model, thinkingLevel }");
+    }
   }
 
   if (raw.tiers !== undefined) {
@@ -208,7 +311,7 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     config.reasoningOverrideMinScore = raw.reasoningOverrideMinScore;
   }
 
-  for (const key of ["codeKeywords", "reasoningKeywords", "technicalKeywords", "simpleKeywords"] as const) {
+  for (const key of ["codeKeywords", "reasoningKeywords", "simpleKeywords"] as const) {
     const value = raw[key];
     if (value === undefined) continue;
     if (!Array.isArray(value) || value.some((k) => typeof k !== "string")) {
@@ -216,6 +319,24 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
       continue;
     }
     config[key] = value as string[];
+  }
+
+  // The built-in technical list is append-only. Upstream lets `technical_keywords` replace
+  // it; here that is refused outright rather than ignored, because a key that reads as "my
+  // technical keywords" but changes nothing would be worse than one that fails loudly.
+  if (raw.technicalKeywords !== undefined) {
+    errors.push(
+      "technicalKeywords cannot be overridden; use customTechnicalKeywords to append domain terms " +
+        "to the built-in list",
+    );
+  }
+  if (raw.customTechnicalKeywords !== undefined) {
+    const value = raw.customTechnicalKeywords;
+    if (!Array.isArray(value) || value.some((k) => typeof k !== "string")) {
+      errors.push("customTechnicalKeywords must be an array of strings");
+    } else {
+      config.customTechnicalKeywords = (value as string[]).map((k) => k.trim()).filter((k) => k.length > 0);
+    }
   }
 
   if (raw.classifierType !== undefined) {
@@ -370,6 +491,106 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     }
   }
 
+  if (raw.adaptive !== undefined) {
+    if (typeof raw.adaptive === "boolean") {
+      config.adaptive = raw.adaptive;
+    } else {
+      errors.push("adaptive must be a boolean");
+    }
+  }
+
+  if (raw.adaptiveWeights !== undefined) {
+    const value = raw.adaptiveWeights;
+    const inUnit = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+    if (!isRecord(value) || !inUnit(value.quality) || !inUnit(value.cost)) {
+      errors.push("adaptiveWeights must be { quality, cost } with both in [0, 1]");
+    } else if (Math.abs(value.quality + value.cost - 1) > 0.001) {
+      // The two terms are the whole score: a sum that is not 1 just rescales it, and a
+      // sum that differs from the operator's mental model hides which term dominates.
+      errors.push(`adaptiveWeights must sum to 1.0, got quality=${value.quality} + cost=${value.cost}`);
+    } else {
+      config.adaptiveWeights = { quality: value.quality, cost: value.cost };
+    }
+  }
+
+  if (raw.tierDistancePenalty !== undefined) {
+    if (typeof raw.tierDistancePenalty === "number" && Number.isFinite(raw.tierDistancePenalty) && raw.tierDistancePenalty >= 0) {
+      config.tierDistancePenalty = raw.tierDistancePenalty;
+    } else {
+      errors.push("tierDistancePenalty must be a number >= 0");
+    }
+  }
+
+  if (raw.adaptiveEligible !== undefined) {
+    if (raw.adaptiveEligible === "all" || raw.adaptiveEligible === "classified_tier") {
+      config.adaptiveEligible = raw.adaptiveEligible;
+    } else {
+      errors.push(`adaptiveEligible must be "all" or "classified_tier"`);
+    }
+  }
+
+  if (raw.semanticKeywordMatching !== undefined) {
+    if (typeof raw.semanticKeywordMatching === "boolean") {
+      config.semanticKeywordMatching = raw.semanticKeywordMatching;
+    } else {
+      errors.push("semanticKeywordMatching must be a boolean");
+    }
+  }
+
+  if (raw.embeddingModel !== undefined) {
+    if (typeof raw.embeddingModel === "string" && raw.embeddingModel.trim()) {
+      config.embeddingModel = raw.embeddingModel.trim();
+    } else {
+      errors.push("embeddingModel must be a model string (provider/model-id)");
+    }
+  }
+
+  if (raw.matchThreshold !== undefined) {
+    const value = raw.matchThreshold;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1) {
+      config.matchThreshold = value;
+    } else {
+      errors.push("matchThreshold must be a number in [0, 1]");
+    }
+  }
+
+  if (raw.embeddingEndpoint !== undefined) {
+    const value = raw.embeddingEndpoint;
+    if (!isRecord(value)) {
+      errors.push("embeddingEndpoint must be an object { baseUrl, apiKeyEnv, timeoutMs }");
+    } else {
+      if (value.baseUrl !== undefined) {
+        if (typeof value.baseUrl === "string" && value.baseUrl.trim()) {
+          config.embeddingEndpoint.baseUrl = value.baseUrl.trim();
+        } else {
+          errors.push("embeddingEndpoint.baseUrl must be a non-empty string");
+        }
+      }
+      if (value.apiKeyEnv !== undefined) {
+        if (typeof value.apiKeyEnv === "string" && value.apiKeyEnv.trim()) {
+          config.embeddingEndpoint.apiKeyEnv = value.apiKeyEnv.trim();
+        } else {
+          errors.push("embeddingEndpoint.apiKeyEnv must be a non-empty string");
+        }
+      }
+      if (value.timeoutMs !== undefined) {
+        if (typeof value.timeoutMs === "number" && value.timeoutMs > 0) {
+          config.embeddingEndpoint.timeoutMs = Math.floor(value.timeoutMs);
+        } else {
+          errors.push("embeddingEndpoint.timeoutMs must be a positive number");
+        }
+      }
+    }
+  }
+
+  if (raw.decisionLog !== undefined) {
+    if (typeof raw.decisionLog === "boolean") {
+      config.decisionLog = raw.decisionLog;
+    } else {
+      errors.push("decisionLog must be a boolean");
+    }
+  }
+
   if (raw.reminderMarkers !== undefined) {
     if (!Array.isArray(raw.reminderMarkers) || raw.reminderMarkers.length === 0) {
       errors.push("reminderMarkers must be a non-empty array of { open, close } pairs");
@@ -404,6 +625,26 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     if (config.tiers[tier].length === 0 && configuredTiers.length > 0) {
       warnings.push(`tiers.${tier} has no models; requests classified there fall back to the next candidate`);
     }
+  }
+
+  if (config.semanticKeywordMatching) {
+    // Both upstream rules: there is nothing to embed the prompt against without a model,
+    // and nothing to match it to without rules.
+    if (!config.embeddingModel) {
+      errors.push("embeddingModel is required when semanticKeywordMatching is enabled");
+    }
+    if (config.keywordTierRules.length === 0) {
+      errors.push("keywordTierRules must be non-empty when semanticKeywordMatching is enabled");
+    }
+  }
+
+  if (config.adaptive) {
+    // The bandit chooses among pool models; defaultModel alone is a fallback, not a pool.
+    if (configuredTiers.length === 0) {
+      errors.push("adaptive requires at least one non-empty tier pool");
+    }
+    // Upstream rejects explicitly-empty pools under adaptive=True. Here an unset tier and
+    // an empty one look the same, so the generic empty-tier warning above stands in.
   }
 
   if (errors.length > 0) config.enabled = false;

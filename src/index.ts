@@ -14,13 +14,21 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type RouterConfig, loadConfig } from "./config.ts";
+import { buildAdaptiveRouter, turnFromRun } from "./adaptive/index.ts";
+import { classifyRequestType } from "./adaptive/request-type.ts";
+import type { AdaptiveRouter } from "./adaptive/router.ts";
+import { defaultAdaptiveStorePath, readPersistedCells, writePersistedCells } from "./adaptive/store.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
 import { splitModelRef } from "./classify/llm.ts";
+import { type SemanticMatcher, buildSemanticMatcher } from "./classify/semantic.ts";
 import {
   type AutorouteState,
   DECISION_ENTRY_TYPE,
   STATE_ENTRY_TYPE,
+  decisionLogLine,
   explain,
+  renderAdaptiveSnapshot,
+  renderDecisionEntry,
   statusLine,
 } from "./decision.ts";
 import { extractTurn, type SimpleMessage } from "./extract.ts";
@@ -39,6 +47,11 @@ export default function autorouter(pi: ExtensionAPI): void {
   let state: AutorouteState = {};
   let pin: SessionPin | null = null;
   let lastDecision: RouteDecision | null = null;
+  /** The ask the last decision was made on; what the bandit credits feedback against. */
+  let lastRoutedAsk: string | null = null;
+  let adaptive: AdaptiveRouter | null = null;
+  const adaptiveStorePath = defaultAdaptiveStorePath();
+  let semantic: SemanticMatcher | null = null;
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
@@ -51,6 +64,22 @@ export default function autorouter(pi: ExtensionAPI): void {
     type: "boolean",
     default: false,
   });
+
+  // The decision log. Every decision is already persisted as a custom entry, which pi can
+  // draw in the chat without it ever reaching the model; this is the drawing. It renders
+  // live as each entry is appended and again when a session is resumed, and ctrl+o
+  // (expand tool output) swaps the one-liner for the full explanation.
+  pi.registerEntryRenderer<RouteDecision>(DECISION_ENTRY_TYPE, (entry, { expanded }, theme) => {
+    if (config?.decisionLog === false || !entry.data) return undefined;
+    return renderDecisionEntry(entry.data, expanded, theme) as never;
+  });
+
+  /** The same line for runs with no chat to draw in (`pi -p`, RPC): stderr, so it never
+   *  mixes with the agent's own output on stdout. */
+  const logDecisionToConsole = (decision: RouteDecision, ctx: ExtensionContext): void => {
+    if (!config?.decisionLog || ctx.hasUI) return;
+    process.stderr.write(`${decisionLogLine(decision)}\n`);
+  };
 
   /** Read the session's message history in the shape `extractTurn` wants. */
   const sessionMessages = (ctx: ExtensionContext): SimpleMessage[] => {
@@ -94,6 +123,22 @@ export default function autorouter(pi: ExtensionAPI): void {
     pi.appendEntry<AutorouteState>(STATE_ENTRY_TYPE, state);
   };
 
+  /**
+   * (Re)build the bandit for the current config, overlaying whatever it learned before.
+   * Posteriors for models no longer in any pool are dropped on load, so a config change
+   * never carries stale beliefs across.
+   */
+  const rebuildAdaptive = (ctx: ExtensionContext): void => {
+    adaptive = config ? buildAdaptiveRouter(config, { registry: ctx.modelRegistry }) : null;
+    if (adaptive) adaptive.load(readPersistedCells(adaptiveStorePath));
+  };
+
+  /** The semantic matcher embeds the rule keywords lazily, on the first prompt that
+   *  needs them, so building it here costs nothing until routing does. */
+  const rebuildSemantic = (ctx: ExtensionContext): void => {
+    semantic = config ? buildSemanticMatcher(config, { registry: ctx.modelRegistry }) : null;
+  };
+
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
     if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
@@ -109,6 +154,8 @@ export default function autorouter(pi: ExtensionAPI): void {
     configErrors = loaded.errors;
     configSources = loaded.sources;
     restoreState(ctx);
+    rebuildAdaptive(ctx);
+    rebuildSemantic(ctx);
     try {
       availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
     } catch {
@@ -193,10 +240,13 @@ export default function autorouter(pi: ExtensionAPI): void {
         pin,
         oneShot,
         callerSystemPrompt: undefined,
+        adaptive,
+        semantic,
       });
 
       applyingOwnModel = false;
       lastDecision = result.decision;
+      lastRoutedAsk = turn.currentAsk;
       if (result.pinToWrite) pin = result.pinToWrite;
       if (result.consumedOneShot) {
         state.nextModel = null;
@@ -207,6 +257,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       }
 
       pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, result.decision);
+      logDecisionToConsole(result.decision, ctx);
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
     } catch (err) {
       // Choosing a model is a routing decision; no failure in it may fail the user's turn.
@@ -217,6 +268,23 @@ export default function autorouter(pi: ExtensionAPI): void {
     }
 
     return { action: "continue" as const };
+  });
+
+  // The bandit learns from what happened after its pick: a rephrase or a "forget it" in
+  // the next prompt counts against the model that produced the previous reply, a tool-call
+  // loop or a near-duplicate reply counts against the model that produced this one.
+  // Upstream does this from the proxy's post-call hook; `agent_end` is pi's equivalent.
+  pi.on("agent_end", async (event, ctx) => {
+    if (!config?.adaptive || !adaptive) return;
+    const model = lastDecision?.chosenModel;
+    if (!model) return;
+    try {
+      const turn = turnFromRun(lastRoutedAsk, event.messages as never);
+      adaptive.recordTurn(ctx.sessionManager.getSessionId(), model, classifyRequestType(lastRoutedAsk), turn);
+      writePersistedCells(adaptiveStorePath, adaptive.serialize());
+    } catch {
+      // Learning is a bonus on top of routing; a failure here must not surface as one.
+    }
   });
 
   /**
@@ -293,6 +361,8 @@ export default function autorouter(pi: ExtensionAPI): void {
     configWarnings = loaded.warnings;
     configErrors = loaded.errors;
     configSources = loaded.sources;
+    rebuildAdaptive(ctx);
+    rebuildSemantic(ctx);
 
     ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
   };
@@ -311,7 +381,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           .map((ref) => ({ value: `${verb} ${ref}`, label: ref }));
         return matches.length > 0 ? matches : null;
       }
-      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "status"];
+      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "log", "adaptive", "status"];
       const items = verbs.filter((v) => v.startsWith(prefix)).map((v) => ({ value: v, label: v }));
       return items.length > 0 ? items : null;
     },
@@ -400,6 +470,39 @@ export default function autorouter(pi: ExtensionAPI): void {
           return;
         }
 
+        case "log": {
+          // The session's decisions, oldest first, as log lines; `/autoroute log 5` for the
+          // last five. Read back from the session so it works after a resume too.
+          const limit = Number.parseInt(rest[0] ?? "", 10);
+          const decisions: RouteDecision[] = [];
+          try {
+            for (const entry of ctx.sessionManager.getEntries()) {
+              if (entry.type !== "custom") continue;
+              const custom = entry as { customType?: string; data?: unknown };
+              if (custom.customType === DECISION_ENTRY_TYPE && custom.data) decisions.push(custom.data as RouteDecision);
+            }
+          } catch {
+            // Unreadable history: fall through to whatever this process saw.
+          }
+          if (decisions.length === 0 && lastDecision) decisions.push(lastDecision);
+          if (decisions.length === 0) {
+            ctx.ui.notify("autoroute: no decisions yet this session", "info");
+            return;
+          }
+          const shown = Number.isFinite(limit) && limit > 0 ? decisions.slice(-limit) : decisions;
+          ctx.ui.notify(shown.map(decisionLogLine).join("\n"), "info");
+          return;
+        }
+
+        case "adaptive": {
+          if (!config?.adaptive || !adaptive) {
+            ctx.ui.notify("autoroute: adaptive selection is off (set \"adaptive\": true in autorouter.json)", "info");
+            return;
+          }
+          ctx.ui.notify(renderAdaptiveSnapshot(adaptive.snapshot(), config, adaptiveStorePath), "info");
+          return;
+        }
+
         default: {
           const lines: string[] = [];
           const why = routingDisabled();
@@ -412,6 +515,14 @@ export default function autorouter(pi: ExtensionAPI): void {
                   : ""
               }`,
             );
+            if (config.adaptive) {
+              lines.push(
+                `adaptive: on (${config.adaptiveEligible}, quality ${config.adaptiveWeights.quality} / cost ${config.adaptiveWeights.cost}, penalty ${config.tierDistancePenalty})`,
+              );
+            }
+            if (config.semanticKeywordMatching) {
+              lines.push(`keywords: semantic (${config.embeddingModel}, threshold ${config.matchThreshold})`);
+            }
           }
           if (configSources.length > 0) lines.push(`config:   ${configSources.join(", ")}`);
           for (const error of configErrors) lines.push(`error:    ${error}`);

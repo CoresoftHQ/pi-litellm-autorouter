@@ -33,34 +33,67 @@ export interface Applied {
   fellBackBecause?: string;
 }
 
+/** `defaultModel` as a candidate, thinking level included; null when none is set. */
+export function defaultTarget(config: RouterConfig): TierTarget | null {
+  if (!config.defaultModel) return null;
+  const target: TierTarget = { model: config.defaultModel };
+  if (config.defaultModelThinkingLevel) target.thinkingLevel = config.defaultModelThinkingLevel;
+  return target;
+}
+
+/** Uniform draw in [0, 1). Injected so tests can pin the pool pick. */
+export type Rng = () => number;
+
+/** `random.choice`: one entry of a non-empty list, uniformly. */
+export function randomChoice<T>(items: readonly T[], rng: Rng): T | undefined {
+  if (items.length === 0) return undefined;
+  return items[Math.min(items.length - 1, Math.floor(rng() * items.length))];
+}
+
 /**
  * Candidates for `tier`, best first.
  *
- * The tier's own targets come first, then progressively lower tiers, then `defaultModel`.
- * Walking *down* rather than up is deliberate: if the tier a request was classified into
- * is unusable, serving it from a cheaper model is a degradation, while silently promoting
- * it to a more expensive one is a bill the user did not ask for.
+ * The head of the list is upstream's `get_model_for_tier`: a random pick from the tier's
+ * pool (`_pick_from_tier_value` is `random.choice` over a list), else `defaultModel`, else
+ * a random pick from MEDIUM. Upstream stops there and raises if nothing is configured.
+ *
+ * The tail is pi's safety rail, which upstream does not need because a proxy has no notion
+ * of a model the user lacks credentials for: the rest of the pool, then progressively lower
+ * tiers, then `defaultModel`. Walking *down* rather than up is deliberate — if the tier a
+ * request was classified into is unusable, serving it from a cheaper model is a
+ * degradation, while silently promoting it to a more expensive one is a bill the user did
+ * not ask for.
  */
-export function candidatesForTier(tier: Tier, config: RouterConfig): TierTarget[] {
+export function candidatesForTier(tier: Tier, config: RouterConfig, rng: Rng = Math.random): TierTarget[] {
   const candidates: TierTarget[] = [];
   const seen = new Set<string>();
 
-  const push = (target: TierTarget) => {
+  const push = (target: TierTarget | null | undefined) => {
+    if (!target) return;
     const key = `${target.model}::${target.thinkingLevel ?? ""}`;
     if (seen.has(key)) return;
     seen.add(key);
     candidates.push(target);
   };
 
-  for (const target of config.tiers[tier]) push(target);
+  // ── upstream's pick ──
+  const pool = config.tiers[tier];
+  if (pool.length > 0) {
+    push(randomChoice(pool, rng));
+  } else if (config.defaultModel) {
+    push(defaultTarget(config));
+  } else {
+    push(randomChoice(config.tiers.MEDIUM, rng));
+  }
 
+  // ── pi's credential rail ──
+  for (const target of pool) push(target);
   for (let severity = tierSeverity(tier) - 1; severity >= 0; severity--) {
     const lower = TIER_SEVERITY_ORDER[severity];
     if (!lower) continue;
     for (const target of config.tiers[lower]) push(target);
   }
-
-  if (config.defaultModel) push({ model: config.defaultModel });
+  push(defaultTarget(config));
   return candidates;
 }
 

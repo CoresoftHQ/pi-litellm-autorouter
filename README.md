@@ -31,11 +31,13 @@ Each user prompt goes through: **extract → classify → override → select �
      to agent traffic.
 3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
    escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
-   `keyword_tier_rules` (deterministic keyword → tier), and a plan-mode floor (routes at least to a
+   `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
-4. **Select** - a tier maps to one model, a pool of models, or (with `adaptive: true`) a Thompson-sampled
-   pick across a pool weighted by quality/cost.
+4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick, as upstream), or,
+   with `adaptive: true`,
+   a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
+   classified tier. See [Adaptive selection](#adaptive-selection).
 5. **Apply** - resolve the chosen model against pi's own model registry and credentials, call
    `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials), then
    `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer status).
@@ -75,7 +77,12 @@ Once it behaves, drop `-e` and point `settings.json` at the clone instead, so `/
 }
 ```
 
-Model names are `provider/model-id`, exactly as pi's `/model` picker shows them.
+Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. `defaultModel` takes the same
+shape as a tier entry, so it can carry a thinking level too:
+
+```json
+{ "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" } }
+```
 
 ### Example: heuristic classifier (default)
 
@@ -84,7 +91,7 @@ Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
   "tiers": {
     "SIMPLE": "anthropic/claude-haiku-4-5",
     "MEDIUM": "anthropic/claude-sonnet-5",
@@ -116,7 +123,7 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
   "classifierType": "llm",
   "classifierLLMConfig": {
     "model": "anthropic/claude-haiku-4-5",
@@ -136,11 +143,166 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 }
 ```
 
+### Example: mixing providers
+
+Tiers are independent, so each can name whichever provider does that job best - and the classifier can be a
+third. Here OpenAI covers the cheap tiers, Anthropic the hard ones, and a small Mistral model classifies.
+Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.json).
+
+```json
+{
+  "defaultModel": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+  "classifierType": "llm",
+  "classifierLLMConfig": {
+    "model": "mistral/mistral-small-2603",
+    "classificationRubric": "agentic",
+    "timeoutMs": 2000
+  },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": false,
+  "tiers": {
+    "SIMPLE": { "model": "openai/gpt-5.6-luna", "thinkingLevel": "low" },
+    "MEDIUM": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "xhigh" }
+  }
+}
+```
+
+Every model named must be one pi can reach with its own credentials; a tier whose provider has no key falls
+down the chain to the next usable candidate, and the decision log says so under `fallback=`.
+
 Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
 can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
 - e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
 configures the LLM classifier in one go. There's no separate command to flip classifier mode afterwards;
 re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in the config file.
+
+## Options
+
+All keys go in the same `autorouter.json`. Names are the camelCase spelling of LiteLLM's
+`complexity_router_config` keys, so a config can move between the two systems.
+
+### Domain keywords for the heuristic scorer
+
+The scorer's `technicalTerms` dimension counts hits against a built-in list of ~80 terms. That list is
+calibrated against the dimension's thresholds and **cannot be replaced** (a `technicalKeywords` key is
+rejected), but it can be extended:
+
+```json
+{
+  "customTechnicalKeywords": ["kafka", "redis", "postgresql", "udp", "dns"]
+}
+```
+
+Entries are appended in order and deduplicated case-insensitively against the built-in list, so listing
+`"TCP"` when `"tcp"` is already built in changes nothing. Mirrors upstream's `custom_technical_keywords`.
+
+### Semantic keyword matching
+
+By default `keywordTierRules` match literally (word-bounded, case-insensitive). With
+`semanticKeywordMatching: true` they match by embedding similarity instead, so a paraphrase with no keyword
+in it ("help me roll out my k8s cluster") still hits a rule for `"kubernetes deployment"`. Port of upstream's
+`semantic_keyword_matching` / `embedding_model` / `match_threshold`.
+
+```json
+{
+  "keywordTierRules": [
+    { "keywords": ["kubernetes deployment", "container orchestration"], "tier": "REASONING" },
+    { "keywords": ["hello", "thanks"], "tier": "SIMPLE" }
+  ],
+  "semanticKeywordMatching": true,
+  "embeddingModel": "voyage/voyage-3-5",
+  "matchThreshold": 0.5,
+  "embeddingEndpoint": { "apiKeyEnv": "VOYAGE_API_KEY", "timeoutMs": 3000 }
+}
+```
+
+- One route per tier, that tier's keywords as its utterances, `max` aggregation: a prompt matches a tier when
+  it is close to *any* of the tier's keywords, and the closest tier wins if its similarity is at least
+  `matchThreshold`. Keywords are embedded once per session; only the prompt is embedded per turn.
+- With semantic matching on, literal matching is **not** consulted (as upstream). An embedding failure -
+  timeout, bad key, endpoint down - yields no override and the prompt falls through to the classifier; the
+  decision records why under `signals`.
+- pi has no embeddings API, so the call goes straight to an OpenAI-compatible `/embeddings` endpoint.
+  `embeddingModel` is `provider/model-id`; the base URL comes from `embeddingEndpoint.baseUrl`, else the provider
+  pi knows by that name, else a built-in table (`voyage`, `openai`, `mistral`, `openrouter`, `together`,
+  `fireworks`, `google`). The key comes from `embeddingEndpoint.apiKeyEnv`, else pi's key for the provider,
+  else `<PROVIDER>_API_KEY`.
+- Requires `embeddingModel` and at least one rule; `matchThreshold` is in `[0, 1]`.
+
+### Adaptive selection
+
+Off by default. With `adaptive: true`, a tier's pool is no longer sampled uniformly: every model gets a
+Beta posterior per request type (`code_generation`, `code_understanding`, `technical_design`,
+`analytical_reasoning`, `writing`, `factual_lookup`, `general`), and each prompt draws one Thompson sample
+per candidate and scores it as
+
+```
+quality_weight · sample + cost_weight · normalised_price − tier_distance_penalty · |tier − classified tier|
+```
+
+Port of upstream's `adaptive` / `adaptive_weights` / `tier_distance_penalty` / `adaptive_eligible`, including
+its cold-start phase (unobserved models in the classified tier are tried uniformly first) and its defaults.
+
+```json
+{
+  "adaptive": true,
+  "adaptiveWeights": { "quality": 0.3, "cost": 0.7 },
+  "tierDistancePenalty": 0.5,
+  "adaptiveEligible": "all",
+  "tiers": {
+    "SIMPLE": [{ "model": "anthropic/claude-haiku-4-5", "qualityTier": 1, "strengths": ["factual_lookup"] }],
+    "MEDIUM": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
+    "COMPLEX": [{ "model": "anthropic/claude-sonnet-5", "qualityTier": 2, "strengths": ["code_generation"] }],
+    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high", "qualityTier": 3 }
+  }
+}
+```
+
+- `adaptiveWeights` must sum to 1. The upstream complexity-router default leans on cost (0.3 / 0.7).
+- `adaptiveEligible: "all"` scores every pool model with the distance penalty, so a cheap model with a strong
+  posterior can win a `COMPLEX` prompt (a *soft* floor). `"classified_tier"` samples only inside the classified
+  tier's pool. The plan-mode floor is always hard: candidates below it are excluded outright.
+- `qualityTier` (1–3, default 2) and `strengths` on a tier entry set the cold-start prior, mirroring upstream's
+  `model_info.adaptive_router_preferences`. Prices come from pi's model registry.
+- Only the classifier path is adaptive, as upstream: `keywordTierRules`, a session-affinity pin and the plan-mode
+  shortcut still take the plain uniform pool pick.
+
+The bandit learns from what happens after each pick, using upstream's signal detectors on pi's `agent_end`
+event: a rephrase or a "forget it" in the next prompt counts against the model that produced the previous
+reply; a tool-call loop, a near-duplicate reply, or an errored tool result counts against the model that
+produced this one; a "thanks" (after the third turn) counts for it. Posteriors persist in
+`~/.pi/agent/autorouter-adaptive.json`; rows for models no longer in any pool are dropped on load. Inspect
+them with `/autoroute adaptive`, and see how the last pick was scored with `/autoroute explain`.
+
+### Decision log
+
+On by default. Every routing decision prints one line in the shape of upstream's
+[decision log](https://docs.litellm.ai/docs/proxy/auto_routing#decision-log), so `cause=` searches work the same
+against pi's console and a LiteLLM proxy log:
+
+```
+autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-4-5
+autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5, thinking=high, keyword="migration"
+autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
+autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low
+```
+
+pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallback`, the adaptive phase under
+`signals`) appear only when set, after upstream's fields.
+
+- **Interactive mode**: the line is drawn dimly in the chat, just above the prompt it routed. It is a rendering
+  of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
+  model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
+  the full breakdown `/autoroute explain` would show.
+- **`pi -p` / RPC**: the line goes to **stderr**, keeping stdout clean for the agent's output.
+- `/autoroute log [n]` replays the session's decisions (or the last `n`) on demand.
+- `"decisionLog": false` silences both; decisions are still recorded and `/autoroute log` still works.
 
 ## Useful commands
 
@@ -148,7 +310,9 @@ re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in 
 |---|---|
 | `/autoroute` | Show current classifier, last decision, tier, and score |
 | `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach |
-| `/autoroute explain` | Per-dimension breakdown of why a prompt got its tier |
+| `/autoroute explain` | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
+| `/autoroute log [n]` | Replay the session's routing decisions as log lines |
+| `/autoroute adaptive` | The bandit's learned posteriors per request type and model |
 | `/autoroute next <model>` | Force a model for the next prompt only |
 | `/autoroute pin <model>` | Freeze on one model until unpinned |
 | `/autoroute escalate` | Re-run the last prompt one tier up |

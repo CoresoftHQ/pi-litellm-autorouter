@@ -1,5 +1,8 @@
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": {
+    "model": "anthropic/claude-haiku-4-5",
+    "thinkingLevel": "low"
+  },
   "classifierType": "llm",
   "classifierLLMConfig": {
     "model": "anthropic/claude-haiku-4-5",
@@ -14,6 +17,9 @@
     "SIMPLE": "anthropic/claude-haiku-4-5",
     "MEDIUM": "anthropic/claude-sonnet-5",
     "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "REASONING": {
+      "model": "anthropic/claude-opus-5",
+      "thinkingLevel": "high"
+    }
   }
 }

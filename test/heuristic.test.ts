@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { buildConfig } from "../src/config.ts";
-import { classifyHeuristic, keywordMatches } from "../src/classify/heuristic.ts";
+import {
+  appendCustomKeywords,
+  classifyHeuristic,
+  effectiveTechnicalKeywords,
+  keywordMatches,
+} from "../src/classify/heuristic.ts";
+import { DEFAULT_TECHNICAL_KEYWORDS } from "../src/defaults.ts";
 
 function config(overrides: Record<string, unknown> = {}) {
   return buildConfig([
@@ -121,5 +127,36 @@ describe("classifyHeuristic", () => {
     // Everything lands in REASONING when every boundary is 0.
     const wide = config({ tierBoundaries: { simple_medium: -99, medium_complex: -99, complex_reasoning: -99 } });
     expect(classifyHeuristic("hi", wide).tier).toBe("REASONING");
+  });
+});
+
+describe("customTechnicalKeywords", () => {
+  it("appends to the built-in list, preserving order", () => {
+    expect(effectiveTechnicalKeywords(config({ customTechnicalKeywords: ["udp", "kafka"] }))).toEqual([
+      ...DEFAULT_TECHNICAL_KEYWORDS,
+      "udp",
+      "kafka",
+    ]);
+  });
+
+  it("dedupes case-insensitively against the base list and within itself", () => {
+    const base = DEFAULT_TECHNICAL_KEYWORDS;
+    expect(base).toContain("tcp");
+    const merged = appendCustomKeywords(base, ["TCP", "udp", "UDP", "kafka"]);
+    expect(merged.map((k) => k.toLowerCase())).toEqual([...base.map((k) => k.toLowerCase()), "udp", "kafka"]);
+  });
+
+  it("leaves the built-in list untouched when nothing is configured", () => {
+    expect(effectiveTechnicalKeywords(config())).toEqual([...DEFAULT_TECHNICAL_KEYWORDS]);
+  });
+
+  it("lets a prompt that only hits custom terms score as technical", () => {
+    const prompt = "Configure udp multicast between kafka brokers";
+    const baseline = classifyHeuristic(prompt, config());
+    const custom = classifyHeuristic(prompt, config({ customTechnicalKeywords: ["udp", "kafka", "multicast"] }));
+    const technical = (c: typeof custom) => c.dimensions?.find((d) => d.name === "technicalTerms")?.score ?? 0;
+    expect(technical(baseline)).toBe(0);
+    expect(technical(custom)).toBeGreaterThan(0);
+    expect(custom.score ?? 0).toBeGreaterThan(baseline.score ?? 0);
   });
 });

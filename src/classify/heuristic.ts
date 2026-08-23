@@ -25,6 +25,31 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * `base` followed by every custom keyword that is not already in it.
+ *
+ * Port of upstream's `_append_custom_keywords`: order is preserved and duplicates are
+ * dropped case-insensitively, both against the base list and within the custom list, so a
+ * term listed twice cannot count twice towards the technicalTerms threshold.
+ */
+export function appendCustomKeywords(base: readonly string[], custom: readonly string[]): string[] {
+  if (custom.length === 0) return [...base];
+  const seen = new Set(base.map((keyword) => keyword.toLowerCase()));
+  const appended: string[] = [];
+  for (const keyword of custom) {
+    const key = keyword.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    appended.push(keyword);
+  }
+  return [...base, ...appended];
+}
+
+/** The technical keyword list the scorer actually uses: built-in plus `customTechnicalKeywords`. */
+export function effectiveTechnicalKeywords(config: RouterConfig): string[] {
+  return appendCustomKeywords(DEFAULT_TECHNICAL_KEYWORDS, config.customTechnicalKeywords);
+}
+
+/**
  * Does `keyword` occur in `text` (both already lowercased)?
  *
  * Single-word keywords use word boundaries so "api" does not match "capital" and "error"
@@ -117,7 +142,7 @@ export function classifyHeuristic(prompt: string, config: RouterConfig): Classif
   );
   const technical = scoreKeywordMatch(
     userText,
-    config.technicalKeywords ?? DEFAULT_TECHNICAL_KEYWORDS,
+    effectiveTechnicalKeywords(config),
     "technicalTerms",
     "technical",
     [2, 4],

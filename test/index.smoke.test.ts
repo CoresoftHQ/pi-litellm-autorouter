@@ -27,6 +27,7 @@ function mockPi() {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const flags = new Map<string, unknown>();
   const entries: { type: string; data: unknown }[] = [];
+  const entryRenderers = new Map<string, (entry: unknown, opts: { expanded: boolean }, theme: unknown) => unknown>();
   const setModelCalls: string[] = [];
   const thinkingCalls: string[] = [];
 
@@ -46,6 +47,10 @@ function mockPi() {
       commands.set(name, opts),
     ),
     appendEntry: vi.fn((type: string, data: unknown) => entries.push({ type, data })),
+    registerEntryRenderer: vi.fn(
+      (type: string, renderer: (entry: unknown, opts: { expanded: boolean }, theme: unknown) => unknown) =>
+        entryRenderers.set(type, renderer),
+    ),
     setModel: vi.fn(async (model: { provider: string; id: string }) => {
       setModelCalls.push(`${model.provider}/${model.id}`);
       // Real pi raises model_select from inside setModel. Firing it here rather than from
@@ -84,6 +89,7 @@ function mockPi() {
     emit,
     commands,
     entries,
+    entryRenderers,
     setModelCalls,
     thinkingCalls,
     flags,
@@ -91,6 +97,8 @@ function mockPi() {
     enableModelSelectEcho,
   };
 }
+
+const THEME = { fg: (_color: string, text: string) => `<${text}>` };
 
 const CATALOGUE = [
   { provider: "openai", id: "gpt-mini", cost: { input: 0.15, output: 0.6 }, input: ["text"] },
@@ -524,5 +532,304 @@ describe("extension wiring", () => {
     await m.fire("input", { text: "hi", source: "interactive" }, ctx);
 
     expect(m.setModelCalls).toEqual(["anthropic/sonnet", "anthropic/haiku"]);
+  });
+});
+
+describe("adaptive wiring", () => {
+  let dir: string;
+  let home: string;
+  let originalHome: string | undefined;
+
+  const ADAPTIVE_CONFIG = {
+    ...CONFIG,
+    adaptive: true,
+    tiers: { SIMPLE: ["anthropic/haiku", "openai/gpt-mini"], MEDIUM: "anthropic/sonnet", COMPLEX: "anthropic/sonnet", REASONING: "anthropic/opus" },
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+    home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(ADAPTIVE_CONFIG));
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function adaptiveCtx() {
+    return mockCtx(dir, {
+      sessionManager: {
+        getBranch: () => [],
+        getEntries: () => [],
+        getSessionFile: () => "/tmp/session.jsonl",
+        getSessionId: () => "session-1",
+      },
+      modelRegistry: {
+        find: (provider: string, modelId: string) => CATALOGUE.find((m) => m.provider === provider && m.id === modelId),
+        getAvailable: () => CATALOGUE,
+        complete: vi.fn(),
+      },
+    });
+  }
+
+  it("picks from the pool, learns from the run, and persists what it learned", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = adaptiveCtx();
+    await m.fire("session_start", { reason: "startup" }, ctx);
+
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.adaptive?.phase).toBe("cold_start");
+    expect(["anthropic/haiku", "openai/gpt-mini"]).toContain(decision.chosenModel);
+    expect(m.setModelCalls).toEqual([decision.chosenModel]);
+
+    // A run whose tool result errored is a failure signal against the chosen model.
+    await m.fire(
+      "agent_end",
+      {
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "x" } }], stopReason: "toolUse" },
+          { role: "toolResult", content: [{ type: "text", text: "command not found" }], isError: true },
+          { role: "assistant", content: [{ type: "text", text: "that failed" }], stopReason: "stop" },
+        ],
+      },
+      ctx,
+    );
+
+    const storePath = join(home, ".pi", "agent", "autorouter-adaptive.json");
+    expect(existsSync(storePath)).toBe(true);
+    const persisted = JSON.parse(readFileSync(storePath, "utf8")) as { cells: { model: string; requestType: string; beta: number }[] };
+    const cell = persisted.cells.find((c) => c.model === decision.chosenModel && c.requestType === "general")!;
+    expect(cell.beta).toBeCloseTo(6); // prior 5 + 1 failure
+
+    // A fresh session overlays the persisted posterior on its priors.
+    const again = mockPi();
+    autorouter(again.pi as never);
+    const ctx2 = adaptiveCtx();
+    await again.fire("session_start", { reason: "startup" }, ctx2);
+    await again.commands.get("autoroute")!.handler("adaptive", ctx2);
+    const shown = (ctx2.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+    expect(shown).toContain("general:");
+    expect(shown).toContain("samples   1");
+  });
+
+  it("reports adaptive as off when the config does not enable it", async () => {
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = adaptiveCtx();
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("adaptive", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/adaptive selection is off/), "info");
+    await m.fire("agent_end", { messages: [] }, ctx);
+    expect(existsSync(join(home, ".pi", "agent", "autorouter-adaptive.json"))).toBe(false);
+  });
+});
+
+describe("semantic keyword matching wiring", () => {
+  let dir: string;
+  let home: string;
+  let originalHome: string | undefined;
+  let originalFetch: typeof fetch;
+
+  const SEMANTIC_CONFIG = {
+    ...CONFIG,
+    keywordTierRules: [{ keywords: ["kubernetes deployment"], tier: "REASONING" }],
+    semanticKeywordMatching: true,
+    embeddingModel: "voyage/voyage-3-5",
+    embeddingEndpoint: { apiKeyEnv: "TEST_EMBED_KEY" },
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+    home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(SEMANTIC_CONFIG));
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+    process.env.TEST_EMBED_KEY = "k";
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    delete process.env.TEST_EMBED_KEY;
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("embeds the rule keywords and the prompt, and routes on similarity", async () => {
+    const calls: { url: string; body: { model: string; input: string[] } }[] = [];
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { model: string; input: string[] };
+      calls.push({ url, body });
+      // Every input maps to the same direction: the prompt is a perfect match.
+      return new Response(JSON.stringify({ data: body.input.map((_, index) => ({ index, embedding: [1, 0] })) }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "help me roll out my k8s cluster", source: "interactive" }, ctx);
+
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://api.voyageai.com/v1/embeddings",
+      "https://api.voyageai.com/v1/embeddings",
+    ]);
+    expect(calls[0]?.body).toEqual({ model: "voyage-3-5", input: ["kubernetes deployment"] });
+    expect(calls[1]?.body.input).toEqual(["help me roll out my k8s cluster"]);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.cause).toBe("semantic_keyword_match");
+    expect(decision.chosenModel).toBe("anthropic/opus");
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+
+    await m.commands.get("autoroute")!.handler("", ctx);
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("keywords: semantic (voyage/voyage-3-5"), "info");
+  });
+
+  it("still routes when the embeddings endpoint is down", async () => {
+    globalThis.fetch = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.cause).toBe("heuristic_scorer");
+    expect(decision.signals).toContainEqual(expect.stringMatching(/semantic_keyword_match_failed .*503/));
+    expect(m.setModelCalls).toEqual(["anthropic/haiku"]);
+  });
+});
+
+describe("decision log", () => {
+  let dir: string;
+  let home: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+    home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("renders each decision entry in the chat as an upstream-shaped log line", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    const entry = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)!;
+    const render = m.entryRenderers.get(DECISION_ENTRY_TYPE)!;
+    const component = render({ type: "custom", customType: DECISION_ENTRY_TYPE, data: entry.data }, { expanded: false }, THEME) as {
+      render(width: number): string[];
+    };
+    const lines = component.render(200);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      /^<autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-?\d\.\d{3}, signals=\[.*\], routed_model=anthropic\/haiku>$/,
+    );
+
+    const expanded = render({ type: "custom", customType: DECISION_ENTRY_TYPE, data: entry.data }, { expanded: true }, THEME) as {
+      render(width: number): string[];
+    };
+    const expandedLines = expanded.render(200);
+    expect(expandedLines.length).toBeGreaterThan(3);
+    expect(expandedLines.some((l) => l.includes("model:    anthropic/haiku"))).toBe(true);
+
+    // Long lines wrap to the viewport instead of overflowing it.
+    expect(component.render(40).every((l) => l.length <= 42)).toBe(true);
+  });
+
+  it("writes the line to stderr when there is no chat to draw in", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, { hasUI: false });
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as never);
+    try {
+      await m.fire("session_start", { reason: "startup" }, ctx);
+      await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatch(/^autoroute: routing decision cause=heuristic_scorer, .*routed_model=anthropic\/haiku\n$/);
+  });
+
+  it("can be switched off, leaving the entries recorded but undrawn", async () => {
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify({ ...CONFIG, decisionLog: false }));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, { hasUI: false });
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as never);
+    try {
+      await m.fire("session_start", { reason: "startup" }, ctx);
+      await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written).toEqual([]);
+    const entry = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)!;
+    expect(entry).toBeDefined();
+    const render = m.entryRenderers.get(DECISION_ENTRY_TYPE)!;
+    expect(render({ type: "custom", customType: DECISION_ENTRY_TYPE, data: entry.data }, { expanded: false }, THEME)).toBeUndefined();
+  });
+
+  it("replays the session's decisions with /autoroute log", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, {
+      sessionManager: {
+        getBranch: () => [],
+        getEntries: () => m.entries.map((e) => ({ type: "custom", customType: e.type, data: e.data })),
+        getSessionFile: () => "/tmp/session.jsonl",
+      },
+    });
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("log", ctx);
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: no decisions yet this session", "info");
+
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+    await m.fire("input", { text: "think step by step and analyze this: weigh the options", source: "interactive" }, ctx);
+    await m.commands.get("autoroute")!.handler("log", ctx);
+    const all = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+    expect(all.split("\n")).toHaveLength(2);
+    expect(all).toMatch(/tier=SIMPLE.*\n.*tier=REASONING/s);
+
+    await m.commands.get("autoroute")!.handler("log 1", ctx);
+    const last = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+    expect(last.split("\n")).toHaveLength(1);
+    expect(last).toContain("tier=REASONING");
   });
 });

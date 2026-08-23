@@ -9,6 +9,7 @@
  *   3. keyword tier rules
  *   4. classifier (llm, falling back per `classifierFallback`; else heuristic)
  *   then: escalation keyword (+1 tier), then plan-mode floor
+ *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
  *
  * This module is deliberately free of pi imports: it takes an applier and a registry, so
  * the whole decision path is testable without a running agent.
@@ -21,10 +22,13 @@ import {
   applyFloor,
   escalateTier,
   floorIsTopConfiguredTier,
-  lexicalTierOverride,
   matchedEscalationKeyword,
+  resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
-import { type ModelApplier, applyFirstUsable, candidatesForTier } from "./resolve.ts";
+import type { SemanticMatcher } from "./classify/semantic.ts";
+import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier, defaultTarget } from "./resolve.ts";
+import type { AdaptiveRouter } from "./adaptive/router.ts";
+import { softFloorPick, targetForModel } from "./adaptive/select.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
 
 export interface SessionPin {
@@ -49,6 +53,14 @@ export interface RouteInput {
   /** Injected for testability; defaults to `Date.now`. */
   now?: () => number;
   callerSystemPrompt?: string;
+  /** The bandit state, when `config.adaptive` is on. Without it routing degrades to the
+   *  uniform pool pick rather than failing. */
+  adaptive?: AdaptiveRouter | null;
+  /** The embedding matcher, when `config.semanticKeywordMatching` is on. Without it the
+   *  rules are skipped and the prompt is scored, as on any embedding failure. */
+  semantic?: SemanticMatcher | null;
+  /** Uniform draw in [0, 1) for the pool pick; defaults to `Math.random`. */
+  rng?: Rng;
 }
 
 export interface RouteOutput {
@@ -123,9 +135,34 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const now = input.now ?? Date.now;
   const startedAt = now();
   const { config, turn, api } = input;
+  const rng = input.rng ?? Math.random;
   const decision = emptyDecision();
 
   let consumedOneShot = false;
+
+  /**
+   * Candidates for a classified tier, bandit first when adaptive is on.
+   *
+   * Only the classifier path is adaptive, as upstream: keyword overrides, session pins and
+   * the plan-mode shortcut name a tier or model outright and take the plain uniform pool pick. The
+   * bandit's pick leads the list; the ordinary chain follows so a pick pi cannot apply
+   * (no credentials, say) degrades the same way any first choice does.
+   */
+  const adaptiveCandidates = (tier: Tier, hardFloor: Tier | null): TierTarget[] | null => {
+    if (!config.adaptive || !input.adaptive || !turn.currentAsk) return null;
+    const pick = softFloorPick({
+      classifiedTier: tier,
+      userMessage: turn.currentAsk,
+      config,
+      adaptive: input.adaptive,
+      hardFloor,
+    });
+    if (!pick) return null;
+    decision.adaptive = pick.decision;
+    decision.signals = [...decision.signals, `adaptive:${pick.decision.phase}`];
+    const chosen = targetForModel(pick.model, tier, config);
+    return [chosen, ...candidatesForTier(tier, config, rng).filter((target) => target.model !== pick.model)];
+  };
 
   const finish = async (
     tier: Tier | null,
@@ -133,7 +170,8 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     explicitCandidates?: TierTarget[],
   ): Promise<RouteOutput> => {
     const candidates =
-      explicitCandidates ?? (tier ? candidatesForTier(tier, config) : config.defaultModel ? [{ model: config.defaultModel }] : []);
+      explicitCandidates ??
+      (tier ? candidatesForTier(tier, config, rng) : [defaultTarget(config)].filter((t): t is TierTarget => t !== null));
     const { applied, problems } = await applyFirstUsable(candidates, api);
     decision.tier = tier;
     decision.latencyMs = now() - startedAt;
@@ -221,7 +259,15 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   }
 
   // ── 3. Keyword tier rules ──────────────────────────────────────────────────
-  const override = lexicalTierOverride(turn.currentAsk, config.keywordTierRules);
+  const { override, failure: overrideFailure } = await resolveKeywordTierOverride(
+    turn.currentAsk,
+    config,
+    input.semantic,
+  );
+  if (overrideFailure) {
+    // Upstream logs and falls through to the scorer; here the decision carries the reason.
+    decision.signals = [...decision.signals, `semantic_keyword_match_failed (${overrideFailure})`];
+  }
   if (override) {
     let tier = override.tier;
     if (escalationKeyword) {
@@ -231,8 +277,9 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     const beforeFloor = tier;
     tier = applyFloor(tier, planFloor);
     decision.planFloored = tier !== beforeFloor;
-    decision.cause = decision.planFloored ? "plan_mode" : "literal_keyword_match";
+    decision.cause = decision.planFloored ? "plan_mode" : override.cause;
     decision.matchedKeyword = decision.planFloored ? planSentinel : override.matchedKeyword;
+    if (override.signal) decision.signals = [...decision.signals, override.signal];
     return finish(tier, null);
   }
 
@@ -241,7 +288,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
 
   if ("failed" in classification) {
     decision.cause = "default_model_fallback";
-    decision.signals = [classification.failed];
+    decision.signals = [...decision.signals, classification.failed];
     // A sentinel-carrying request skips this exit: defaultModel carries no tier guarantee,
     // so a plan-mode request must land in the floor's pool, which is the only destination
     // the floor can vouch for.
@@ -250,11 +297,11 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     }
     const tier = applyFloor("MEDIUM", planFloor);
     decision.planFloored = planFloor !== null;
-    return finish(tier, null);
+    return finish(tier, null, adaptiveCandidates(tier, planFloor) ?? undefined);
   }
 
   decision.score = classification.score ?? null;
-  decision.signals = classification.signals;
+  decision.signals = [...decision.signals, ...classification.signals];
   decision.cause = classification.cause;
 
   let tier = classification.tier;
@@ -278,5 +325,10 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
       ? { model: "", tier, expiresAt: now() + config.sessionAffinityTtlSeconds * 1000 }
       : null;
 
-  return finish(tier, pinToWrite);
+  // The hard floor is passed whenever the sentinel is present, not only when the floor
+  // moved the tier: a request classified *at* the floor has planFloored false, yet the
+  // `all` eligibility mode scores every model and only penalises distance, so without the
+  // floor the bandit could still route below it — and a floor a bandit can slide under is
+  // not a floor.
+  return finish(tier, pinToWrite, adaptiveCandidates(tier, planFloor) ?? undefined);
 }

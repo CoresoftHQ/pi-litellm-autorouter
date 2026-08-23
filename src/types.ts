@@ -20,15 +20,52 @@ export function tierSeverity(tier: Tier): number {
   return TIER_SEVERITY_ORDER.indexOf(tier);
 }
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
 
 /** A model reference as written in config: `provider/modelId`. */
 export type ModelRef = string;
+
+/** The adaptive router's fixed request taxonomy. Mirrors LiteLLM's `RequestType`; bandit
+ *  posteriors are kept per (request type, model), so a model can be learned to be good at
+ *  code and weak at prose. */
+export const REQUEST_TYPES = [
+  "code_generation",
+  "code_understanding",
+  "technical_design",
+  "analytical_reasoning",
+  "writing",
+  "factual_lookup",
+  "general",
+] as const;
+
+export type RequestType = (typeof REQUEST_TYPES)[number];
+
+export function isRequestType(value: unknown): value is RequestType {
+  return typeof value === "string" && (REQUEST_TYPES as readonly string[]).includes(value);
+}
+
+/** A model's self-declared standing for the adaptive router's cold-start prior. Mirrors
+ *  LiteLLM's `model_info.adaptive_router_preferences`. */
+export interface AdaptivePreferences {
+  /** 1 = budget, 2 = balanced (the default), 3 = frontier. Sets the prior mean. */
+  qualityTier: 1 | 2 | 3;
+  /** Request types the model is believed to be strong at; each gets a prior bonus. */
+  strengths: RequestType[];
+}
 
 /** One candidate a tier can route to. */
 export interface TierTarget {
   model: ModelRef;
   thinkingLevel?: ThinkingLevel;
+  /** Only read when `adaptive` is on. */
+  qualityTier?: AdaptivePreferences["qualityTier"];
+  strengths?: RequestType[];
 }
 
 /** Why a particular model was chosen. Mirrors LiteLLM's `routing_decision.cause`
@@ -82,6 +119,34 @@ export interface RouteDecision {
   latencyMs: number;
   /** Set when the intended model could not be applied and a fallback was used. */
   fellBackBecause?: string;
+  /** How the adaptive bandit chose, when `adaptive` is on and a tier was routed. Mirrors
+   *  the `adaptive_router_decision` metadata LiteLLM stamps on the request. */
+  adaptive?: AdaptiveDecision;
+}
+
+export interface AdaptiveCandidate {
+  model: ModelRef;
+  /** Cold-start phase: observations so far for this (request type, model) cell. */
+  totalSamples?: number;
+  /** Adaptive phase: the Thompson draw and the terms it was scored with. */
+  qualitySample?: number;
+  costScore?: number;
+  tierDistance?: number;
+  score?: number;
+}
+
+export interface AdaptiveDecision {
+  /** `cold_start` picks uniformly among unobserved models in the classified tier;
+   *  `adaptive` scores Thompson draws against cost and tier distance. */
+  phase: "cold_start" | "adaptive";
+  classifiedTier: Tier;
+  requestType: RequestType;
+  eligibleMode: "all" | "classified_tier";
+  qualityWeight: number;
+  costWeight: number;
+  tierDistancePenalty: number;
+  chosenModel: ModelRef;
+  candidates: AdaptiveCandidate[];
 }
 
 /** The extracted, classifiable view of a turn. */

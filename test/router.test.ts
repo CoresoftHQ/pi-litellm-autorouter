@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildConfig } from "../src/config.ts";
 import { route } from "../src/router.ts";
+import { decisionLogLine } from "../src/decision.ts";
 import type { ExtractedTurn } from "../src/types.ts";
-import type { ModelApplier } from "../src/resolve.ts";
+import { type ModelApplier, candidatesForTier } from "../src/resolve.ts";
 
 const TIERS = {
   SIMPLE: "anthropic/haiku",
@@ -487,5 +488,102 @@ describe("route — llm classifier", () => {
     });
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.signals.some((s) => s.includes("timed out"))).toBe(true);
+  });
+});
+
+describe("defaultModel thinking level", () => {
+  const withLevel = () =>
+    buildConfig([{ defaultModel: { model: "a/haiku", thinkingLevel: "low" }, tiers: { MEDIUM: "a/sonnet" } }]).config;
+
+  it("applies it when classification falls back to defaultModel", async () => {
+    const levels: string[] = [];
+    const api = applier({ setThinkingLevel: (level) => levels.push(level) });
+    const { decision } = await route({ turn: turn(null), config: withLevel(), api, now });
+    expect(decision.cause).toBe("default_fallback");
+    expect(decision.chosenModel).toBe("a/haiku");
+    expect(decision.thinkingLevel).toBe("low");
+    expect(levels).toEqual(["low"]);
+  });
+
+  it("applies it when an unconfigured tier routes to defaultModel", async () => {
+    const levels: string[] = [];
+    const api = applier({ setThinkingLevel: (level) => levels.push(level) });
+    const { decision } = await route({ turn: turn("hi"), config: withLevel(), api, now });
+    expect(decision.tier).toBe("SIMPLE");
+    expect(decision.chosenModel).toBe("a/haiku");
+    expect(decision.thinkingLevel).toBe("low");
+  });
+
+  it("carries it on the credential rail too", () => {
+    const candidates = candidatesForTier("MEDIUM", withLevel(), () => 0);
+    expect(candidates).toEqual([{ model: "a/sonnet" }, { model: "a/haiku", thinkingLevel: "low" }]);
+  });
+});
+
+describe("candidatesForTier — upstream's get_model_for_tier", () => {
+  const POOLS = {
+    SIMPLE: "a/haiku",
+    MEDIUM: ["a/sonnet", "a/mini"],
+    COMPLEX: ["a/sonnet", { model: "a/opus", thinkingLevel: "medium" }, "a/gpt"],
+  };
+  const built = () => buildConfig([{ defaultModel: "a/haiku", tiers: POOLS }]).config;
+
+  it("picks uniformly from a list pool, like random.choice", () => {
+    const models = (draw: number) => candidatesForTier("COMPLEX", built(), () => draw).map((t) => t.model);
+    expect(models(0)[0]).toBe("a/sonnet");
+    expect(models(0.5)[0]).toBe("a/opus");
+    expect(models(0.99)[0]).toBe("a/gpt");
+    // The rest of the pool, lower tiers, then defaultModel follow as pi's credential rail.
+    expect(models(0.5)).toEqual(["a/opus", "a/sonnet", "a/gpt", "a/mini", "a/haiku"]);
+  });
+
+  it("returns a single-model tier as-is", () => {
+    expect(candidatesForTier("SIMPLE", built(), () => 0.7)[0]).toEqual({ model: "a/haiku" });
+  });
+
+  it("sends an unconfigured tier to defaultModel, then to MEDIUM", () => {
+    expect(candidatesForTier("REASONING", built(), () => 0.9)[0]).toEqual({ model: "a/haiku" });
+    const noDefault = buildConfig([{ tiers: POOLS }]).config;
+    expect(candidatesForTier("REASONING", noDefault, () => 0.9)[0]).toEqual({ model: "a/mini" });
+  });
+
+  it("routes through the injected rng end to end", async () => {
+    const config = buildConfig([{ defaultModel: "a/haiku", tiers: { ...TIERS, SIMPLE: ["a/haiku", "a/mini"] } }]).config;
+    const api = applier();
+    const low = await route({ turn: turn("hi"), config, api, now, rng: () => 0 });
+    const high = await route({ turn: turn("hi"), config, api, now, rng: () => 0.9 });
+    expect(low.decision.chosenModel).toBe("a/haiku");
+    expect(high.decision.chosenModel).toBe("a/mini");
+  });
+});
+
+describe("decisionLogLine", () => {
+  it("mirrors upstream's greppable shape and adds pi's extras only when set", async () => {
+    const plain = await route({ turn: turn("hi"), config: config(), api: applier(), now });
+    expect(decisionLogLine(plain.decision)).toBe(
+      `autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=${plain.decision.score!.toFixed(3)}, ` +
+        `signals=[${plain.decision.signals.join(", ")}], routed_model=anthropic/haiku`,
+    );
+
+    const pinned = await route({
+      turn: turn("hi"),
+      config: config({ sessionAffinity: true }),
+      api: applier(),
+      now,
+      pin: { model: "anthropic/opus", tier: "REASONING", expiresAt: now() + 1 },
+    });
+    expect(decisionLogLine(pinned.decision)).toBe(
+      "autoroute: routing decision cause=session_affinity_pin, tier=REASONING, routed_model=anthropic/opus",
+    );
+
+    const keyword = await route({
+      turn: turn("fix the typo PI ESCALATE"),
+      config: config({ keywordTierRules: [{ keywords: ["typo"], tier: "SIMPLE" }] }),
+      api: applier(),
+      now,
+    });
+    expect(decisionLogLine(keyword.decision)).toBe(
+      'autoroute: routing decision cause=literal_keyword_match, tier=MEDIUM, routed_model=anthropic/sonnet, keyword="typo", escalated=true',
+    );
   });
 });
