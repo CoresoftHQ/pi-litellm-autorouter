@@ -1,13 +1,13 @@
 # pi-litellm-autorouter
 
-A [pi](https://pi.dev) extension that picks the cheapest model able to handle each prompt, automatically —
+A [pi](https://pi.dev) extension that picks the cheapest model able to handle each prompt, automatically -
 in-process, no proxy required.
 
 ## What it does
 
 pi normally uses one model for a whole session, switched by hand with `/model`. That's wasteful: a trivial
 question ("what does this env var do?") doesn't need the same model as a hard debugging session. This
-extension classifies every prompt before it runs and calls `pi.setModel()` to route it to the right tier —
+extension classifies every prompt before it runs and calls `pi.setModel()` to route it to the right tier -
 so cheap prompts go to cheap models and hard prompts go to strong ones, automatically.
 
 It's a TypeScript port of [LiteLLM's Auto Router v2](https://docs.litellm.ai/docs/proxy/auto_routing)
@@ -19,33 +19,30 @@ the model that was actually picked.
 
 Each user prompt goes through: **extract → classify → override → select → apply**.
 
-1. **Extract** — strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
+1. **Extract** - strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
    the current ask plus a few prior turns for context.
-2. **Classify** — score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`.
+2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`.
    Two classifiers are supported:
-   - `heuristic` (default) — a local, sub-millisecond weighted scorer (code presence, reasoning markers,
+   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
      technical terms, length, etc.), no API call.
-   - `llm` — a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
+   - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
      default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
      lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
      to agent traffic.
-3. **Override** — a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
+3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
    escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
    `keyword_tier_rules` (deterministic keyword → tier), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
-   result up exactly one tier — never down, never a caller-chosen model.
-4. **Select** — a tier maps to one model, a pool of models, or (with `adaptive: true`) a Thompson-sampled
+   result up exactly one tier - never down, never a caller-chosen model.
+4. **Select** - a tier maps to one model, a pool of models, or (with `adaptive: true`) a Thompson-sampled
    pick across a pool weighted by quality/cost.
-5. **Apply** — resolve the chosen model against pi's own model registry and credentials, call
+5. **Apply** - resolve the chosen model against pi's own model registry and credentials, call
    `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials), then
    `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer status).
 
 Routing never fails a prompt: any classifier error or unresolved model falls back to `defaultModel`, and the
-model is chosen once per prompt and held for the whole agent turn (including all its tool calls) — it never
+model is chosen once per prompt and held for the whole agent turn (including all its tool calls) - it never
 switches mid-turn.
-
-An optional **proxy mode** exists for people already running a LiteLLM proxy: set `"strategy": "proxy"` and
-the extension delegates to LiteLLM's own router instead of deciding locally.
 
 ## Installation
 
@@ -56,7 +53,7 @@ pi install @coresofthq/pi-litellm-autorouter
 
 `/autoroute init` reads the models pi can reach, ranks them by price, and writes a starter config to
 `~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override). Edit the tiers from
-there — price is only a proxy for capability, not the same thing.
+there - price is only a proxy for capability, not the same thing.
 
 Once it behaves, drop `-e` and point `settings.json` at the clone instead, so `/reload` picks up changes:
 
@@ -82,7 +79,7 @@ Model names are `provider/model-id`, exactly as pi's `/model` picker shows them.
 
 ### Example: heuristic classifier (default)
 
-Local, sub-millisecond, no API calls. Good starting point — this is what `/autoroute init` writes.
+Local, sub-millisecond, no API calls. Good starting point - this is what `/autoroute init` writes.
 Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.json).
 
 ```json
@@ -106,7 +103,7 @@ Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.
 
 ### Example: LLM classifier
 
-Asks a small model to classify each prompt instead of scoring it locally — costs an extra round-trip per
+Asks a small model to classify each prompt instead of scoring it locally - costs an extra round-trip per
 turn, but reads intent rather than keywords. `classificationRubric: "agentic"` is the coding-agent-calibrated
 rubric described above; `classifierFallback: "heuristic"` means a timeout degrades to local
 scoring instead of stalling the turn. Generate this shape with the `llm` flag:
@@ -141,7 +138,7 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 
 Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
 can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
-— e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
+- e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
 configures the LLM classifier in one go. There's no separate command to flip classifier mode afterwards;
 re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in the config file.
 
@@ -158,6 +155,32 @@ re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in 
 | `/autoroute off` / `on` | Toggle routing for the session |
 | `--no-autoroute` | CLI flag to start a session with routing disabled |
 
+## Disabling the extension
+
+`/autoroute off` only pauses routing for the current session, and `--no-autoroute` only for one launch. To
+stop the extension from loading at all - for instance because you'd rather let an external LiteLLM proxy
+do the routing - use pi's own mechanisms:
+
+- **Toggle it interactively**: run `pi config`, find the extension, and disable it. Tab switches between global
+  (`~/.pi/agent/settings.json`) and project-local (`.pi/settings.json`) scope; `pi config -l` starts in the
+  project scope.
+- **Keep the package installed but load nothing from it**: use the object form in `settings.json`, which
+  filters what a package contributes:
+
+  ```json
+  {
+    "packages": [
+      { "source": "npm:@coresofthq/pi-litellm-autorouter", "extensions": [] }
+    ]
+  }
+  ```
+
+  A project `.pi/settings.json` entry overrides the global one, so you can disable it for a single repo and
+  keep it everywhere else.
+- **Remove it entirely**: `pi remove npm:@coresofthq/pi-litellm-autorouter`.
+
+Your `autorouter.json` is left untouched by all of these, so re-enabling picks up where you left off.
+
 ## Development
 
 ```bash
@@ -167,10 +190,10 @@ npm test           # vitest run
 
 ## Prior art
 
-Ported from [BerriAI/litellm](https://github.com/BerriAI/litellm) (MIT, outside `enterprise/`) — the v2
+Ported from [BerriAI/litellm](https://github.com/BerriAI/litellm) (MIT, outside `enterprise/`) - the v2
 router lives in `litellm/router_strategy/complexity_router/`. This is a port of the algorithms, rubrics, and
 config shapes, not a redistribution of LiteLLM code. 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

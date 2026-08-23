@@ -49,7 +49,6 @@ export interface ClassifierLLMConfig {
 
 export interface RouterConfig {
   enabled: boolean;
-  strategy: "local" | "proxy";
   defaultModel: ModelRef | null;
   tiers: Record<Tier, TierTarget[]>;
   tierBoundaries: Record<string, number>;
@@ -73,7 +72,6 @@ export interface RouterConfig {
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
   reminderMarkers: ReminderMarkerPair[];
-  proxy: { baseUrl: string; apiKey?: string; model: string } | null;
 }
 
 export interface LoadedConfig {
@@ -96,7 +94,6 @@ const EMPTY_TIERS: Record<Tier, TierTarget[]> = {
 export function defaultConfig(): RouterConfig {
   return {
     enabled: true,
-    strategy: "local",
     defaultModel: null,
     tiers: { ...EMPTY_TIERS },
     tierBoundaries: { ...DEFAULT_TIER_BOUNDARIES },
@@ -116,7 +113,6 @@ export function defaultConfig(): RouterConfig {
     sessionAffinity: false,
     sessionAffinityTtlSeconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
     reminderMarkers: DEFAULT_REMINDER_MARKERS.map((m) => ({ ...m })),
-    proxy: null,
   };
 }
 
@@ -169,14 +165,6 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   }
 
   if (typeof raw.enabled === "boolean") config.enabled = raw.enabled;
-
-  if (raw.strategy !== undefined) {
-    if (raw.strategy === "local" || raw.strategy === "proxy") {
-      config.strategy = raw.strategy;
-    } else {
-      errors.push(`strategy must be "local" or "proxy", got ${JSON.stringify(raw.strategy)}`);
-    }
-  }
 
   if (typeof raw.defaultModel === "string" && raw.defaultModel.trim()) {
     config.defaultModel = raw.defaultModel.trim();
@@ -404,34 +392,17 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     }
   }
 
-  if (raw.proxy !== undefined) {
-    if (!isRecord(raw.proxy) || typeof raw.proxy.baseUrl !== "string" || typeof raw.proxy.model !== "string") {
-      errors.push("proxy must be { baseUrl, model, apiKey? }");
-    } else {
-      config.proxy = {
-        baseUrl: raw.proxy.baseUrl,
-        model: raw.proxy.model,
-        ...(typeof raw.proxy.apiKey === "string" ? { apiKey: raw.proxy.apiKey } : {}),
-      };
-    }
-  }
-
   // Cross-field checks.
-  if (config.strategy === "proxy" && !config.proxy) {
-    errors.push('strategy is "proxy" but no proxy config was given');
-  }
   if (config.classifierType === "llm" && !config.classifierLLMConfig) {
     errors.push('classifierType is "llm" but classifierLLMConfig is missing');
   }
-  if (config.strategy === "local") {
-    const configuredTiers = TIER_SEVERITY_ORDER.filter((t) => config.tiers[t].length > 0);
-    if (configuredTiers.length === 0 && !config.defaultModel) {
-      errors.push("no tiers and no defaultModel are configured, so there is nothing to route to");
-    }
-    for (const tier of TIER_SEVERITY_ORDER) {
-      if (config.tiers[tier].length === 0 && configuredTiers.length > 0) {
-        warnings.push(`tiers.${tier} has no models; requests classified there fall back to the next candidate`);
-      }
+  const configuredTiers = TIER_SEVERITY_ORDER.filter((t) => config.tiers[t].length > 0);
+  if (configuredTiers.length === 0 && !config.defaultModel) {
+    errors.push("no tiers and no defaultModel are configured, so there is nothing to route to");
+  }
+  for (const tier of TIER_SEVERITY_ORDER) {
+    if (config.tiers[tier].length === 0 && configuredTiers.length > 0) {
+      warnings.push(`tiers.${tier} has no models; requests classified there fall back to the next candidate`);
     }
   }
 

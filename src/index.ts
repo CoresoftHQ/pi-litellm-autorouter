@@ -119,13 +119,6 @@ export default function autorouter(pi: ExtensionAPI): void {
       // Loud, but not fatal: a broken router config must not stop the agent from starting.
       ctx.ui.notify(`autoroute disabled: ${configErrors[0]}`, "error");
     }
-    if (config.strategy === "proxy" && config.proxy) {
-      pi.registerProvider("litellm-proxy", {
-        baseUrl: config.proxy.baseUrl,
-        ...(config.proxy.apiKey ? { apiKey: config.proxy.apiKey } : {}),
-        api: "openai-completions",
-      } as never);
-    }
   });
 
   // Plan mode is not a built-in pi concept — pi ships it as an extension — so there is no
@@ -177,7 +170,6 @@ export default function autorouter(pi: ExtensionAPI): void {
 
     const disabled = routingDisabled();
     if ((disabled && !oneShot) || !config) return { action: "continue" as const };
-    if (config.strategy === "proxy") return { action: "continue" as const };
 
     try {
       const turn = extractTurn(event.text, sessionMessages(ctx), {
@@ -413,7 +405,6 @@ export default function autorouter(pi: ExtensionAPI): void {
           const why = routingDisabled();
           lines.push(`status:   ${why ? `disabled (${why})` : "on"}`);
           if (config) {
-            lines.push(`strategy: ${config.strategy}`);
             lines.push(
               `classifier: ${config.classifierType}${
                 config.classifierLLMConfig

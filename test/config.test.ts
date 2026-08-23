@@ -43,7 +43,7 @@ describe("buildConfig", () => {
   });
 
   it("disables routing when there are errors", () => {
-    const { config } = buildConfig([{ ...base, strategy: "nonsense" }]);
+    const { config } = buildConfig([{ ...base, classifierType: "nonsense" }]);
     expect(config.enabled).toBe(false);
   });
 
@@ -114,11 +114,6 @@ describe("buildConfig", () => {
   it("errors when there is nothing to route to", () => {
     const { errors } = buildConfig([{ tiers: {} }]);
     expect(errors.join()).toContain("nothing to route to");
-  });
-
-  it("requires proxy config when strategy is proxy", () => {
-    const { errors } = buildConfig([{ ...base, strategy: "proxy" }]);
-    expect(errors.join()).toContain("no proxy config");
   });
 });
 
