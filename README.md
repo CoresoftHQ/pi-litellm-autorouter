@@ -91,7 +91,7 @@ Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
   "tiers": {
     "SIMPLE": "anthropic/claude-haiku-4-5",
     "MEDIUM": "anthropic/claude-sonnet-5",
@@ -123,7 +123,7 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
   "classifierType": "llm",
   "classifierLLMConfig": {
     "model": "anthropic/claude-haiku-4-5",

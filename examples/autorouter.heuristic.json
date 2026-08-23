@@ -1,5 +1,8 @@
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": {
+    "model": "anthropic/claude-haiku-4-5",
+    "thinkingLevel": "low"
+  },
   "tiers": {
     "SIMPLE": "anthropic/claude-haiku-4-5",
     "MEDIUM": "anthropic/claude-sonnet-5",

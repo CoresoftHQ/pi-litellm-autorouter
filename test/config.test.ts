@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildConfig } from "../src/config.ts";
 import { classificationSystemPrompt } from "../src/classify/rubrics.ts";
@@ -331,5 +332,16 @@ describe("classificationSystemPrompt", () => {
   it("returns a custom prompt verbatim", () => {
     const prompt = classificationSystemPrompt({ contextWindowSize: 3, rubric: "agentic", customPrompt: "mine" });
     expect(prompt).toBe("mine");
+  });
+});
+
+describe("example configs", () => {
+  it.each(["heuristic", "llm"])("examples/autorouter.%s.json loads without errors", (name) => {
+    const raw = JSON.parse(readFileSync(new URL(`../examples/autorouter.${name}.json`, import.meta.url), "utf8"));
+    const { config, errors, warnings } = buildConfig([raw]);
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(config.defaultModel).toBe("anthropic/claude-haiku-4-5");
+    expect(config.defaultModelThinkingLevel).toBe("low");
   });
 });
