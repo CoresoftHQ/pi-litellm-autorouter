@@ -47,7 +47,7 @@ switches mid-turn.
 ## Installation
 
 ```bash
-pi install @coresofthq/pi-litellm-autorouter
+pi install npm:@coresofthq/pi-litellm-autorouter
 # then, inside pi:  /autoroute init
 ```
 
