@@ -143,6 +143,37 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 }
 ```
 
+### Example: mixing providers
+
+Tiers are independent, so each can name whichever provider does that job best - and the classifier can be a
+third. Here OpenAI covers the cheap tiers, Anthropic the hard ones, and a small Mistral model classifies.
+Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.json).
+
+```json
+{
+  "defaultModel": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+  "classifierType": "llm",
+  "classifierLLMConfig": {
+    "model": "mistral/mistral-small-2603",
+    "classificationRubric": "agentic",
+    "timeoutMs": 2000
+  },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": false,
+  "tiers": {
+    "SIMPLE": { "model": "openai/gpt-5.6-luna", "thinkingLevel": "low" },
+    "MEDIUM": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "xhigh" }
+  }
+}
+```
+
+Every model named must be one pi can reach with its own credentials; a tier whose provider has no key falls
+down the chain to the next usable candidate, and the decision log says so under `fallback=`.
+
 Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
 can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
 - e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and

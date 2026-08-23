@@ -336,12 +336,25 @@ describe("classificationSystemPrompt", () => {
 });
 
 describe("example configs", () => {
+  const load = (name: string) =>
+    buildConfig([JSON.parse(readFileSync(new URL(`../examples/autorouter.${name}.json`, import.meta.url), "utf8"))]);
+
   it.each(["heuristic", "llm"])("examples/autorouter.%s.json loads without errors", (name) => {
-    const raw = JSON.parse(readFileSync(new URL(`../examples/autorouter.${name}.json`, import.meta.url), "utf8"));
-    const { config, errors, warnings } = buildConfig([raw]);
+    const { config, errors, warnings } = load(name);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
     expect(config.defaultModel).toBe("anthropic/claude-haiku-4-5");
     expect(config.defaultModelThinkingLevel).toBe("low");
+  });
+
+  it("examples/autorouter.multillm.json spreads tiers across providers", () => {
+    const { config, errors, warnings } = load("multillm");
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(config.defaultModel).toBe("openai/gpt-5.6-terra");
+    expect(config.defaultModelThinkingLevel).toBe("medium");
+    expect(config.classifierType).toBe("llm");
+    expect(config.classifierLLMConfig?.model).toBe("mistral/mistral-small-2603");
+    expect(config.tiers.REASONING).toEqual([{ model: "anthropic/claude-opus-5", thinkingLevel: "xhigh" }]);
   });
 });
