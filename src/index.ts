@@ -33,6 +33,7 @@ import {
 } from "./decision.ts";
 import { extractTurn, type SimpleMessage } from "./extract.ts";
 import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
+import { hasActiveTodos } from "./todo.ts";
 import { type SessionPin, route } from "./router.ts";
 import type { RouteDecision } from "./types.ts";
 
@@ -98,6 +99,17 @@ export default function autorouter(pi: ExtensionAPI): void {
       // History is an optimisation for the classifier's context window, never a
       // requirement. A session that cannot produce it still routes on the current ask.
       return [];
+    }
+  };
+
+  /** Read the latest persisted todo snapshot. This avoids an optional runtime dependency on
+   * rpiv-todo while still surviving reload, resume, and compaction. */
+  const todoActive = (ctx: ExtensionContext): boolean => {
+    if (!config?.todoContinuation.enabled) return false;
+    try {
+      return hasActiveTodos(ctx.sessionManager.getBranch(), config.todoContinuation.toolName);
+    } catch {
+      return false;
     }
   };
 
@@ -237,6 +249,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         },
         registry: ctx.modelRegistry as never,
         planModeActive,
+        todoActive: todoActive(ctx),
         pin,
         oneShot,
         callerSystemPrompt: undefined,

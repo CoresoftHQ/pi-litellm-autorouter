@@ -227,6 +227,22 @@ in it ("help me roll out my k8s cluster") still hits a rule for `"kubernetes dep
   else `<PROVIDER>_API_KEY`.
 - Requires `embeddingModel` and at least one rule; `matchThreshold` is in `[0, 1]`.
 
+### Todo continuations
+
+When [rpiv-todo](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo) has pending or in-progress tasks, a short approval such as `ok`, `continue`, or `go ahead` should continue that work rather than route as an isolated `SIMPLE` prompt. Enable this optional floor to read the latest persisted `todo` tool result from the active session branch:
+
+```json
+{
+  "todoContinuation": {
+    "enabled": true,
+    "minTier": "COMPLEX",
+    "maxPromptChars": 100
+  }
+}
+```
+
+The floor applies only to built-in acknowledgement phrases within `maxPromptChars`; substantive new prompts continue through ordinary routing. It automatically clears when the latest todo snapshot has no pending or in-progress tasks. `toolName` defaults to `"todo"` and can be changed for a compatible task extension.
+
 ### Adaptive selection
 
 Off by default. With `adaptive: true`, a tier's pool is no longer sampled uniformly: every model gets a

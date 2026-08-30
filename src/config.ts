@@ -59,6 +59,15 @@ export interface ClassifierLLMConfig {
   systemPrompt?: string;
 }
 
+export interface TodoContinuationConfig {
+  enabled: boolean;
+  /** The tool name whose latest result holds the active todo snapshot. */
+  toolName: string;
+  minTier: Tier;
+  /** Ignore longer prompts: they are new requests, not acknowledgements. */
+  maxPromptChars: number;
+}
+
 export interface RouterConfig {
   enabled: boolean;
   defaultModel: ModelRef | null;
@@ -87,6 +96,8 @@ export interface RouterConfig {
   escalationKeywords: string[];
   planModeMinTier: Tier | null;
   planModePatterns: string[];
+  /** Floor short acknowledgements while a persisted todo list remains active. */
+  todoContinuation: TodoContinuationConfig;
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
   reminderMarkers: ReminderMarkerPair[];
@@ -171,6 +182,7 @@ export function defaultConfig(): RouterConfig {
     escalationKeywords: [...DEFAULT_ESCALATION_KEYWORDS],
     planModeMinTier: null,
     planModePatterns: [],
+    todoContinuation: { enabled: false, toolName: "todo", minTier: "COMPLEX", maxPromptChars: 100 },
     sessionAffinity: false,
     sessionAffinityTtlSeconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
     reminderMarkers: DEFAULT_REMINDER_MARKERS.map((m) => ({ ...m })),
@@ -472,6 +484,31 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
           .filter((p): p is string => typeof p === "string")
           .map((p) => p.trim())
           .filter((p) => p.length > 0);
+      }
+    }
+  }
+
+  if (raw.todoContinuation !== undefined) {
+    if (!isRecord(raw.todoContinuation)) {
+      errors.push("todoContinuation must be an object");
+    } else {
+      const value = raw.todoContinuation;
+      if (value.enabled !== undefined) {
+        if (typeof value.enabled === "boolean") config.todoContinuation.enabled = value.enabled;
+        else errors.push("todoContinuation.enabled must be a boolean");
+      }
+      if (value.toolName !== undefined) {
+        if (typeof value.toolName === "string" && value.toolName.trim()) config.todoContinuation.toolName = value.toolName.trim();
+        else errors.push("todoContinuation.toolName must be a non-empty string");
+      }
+      if (value.minTier !== undefined) {
+        if (isTier(value.minTier)) config.todoContinuation.minTier = value.minTier;
+        else errors.push(`todoContinuation.minTier must be one of ${TIER_SEVERITY_ORDER.join(", ")}`);
+      }
+      if (value.maxPromptChars !== undefined) {
+        if (typeof value.maxPromptChars === "number" && Number.isFinite(value.maxPromptChars) && value.maxPromptChars > 0) {
+          config.todoContinuation.maxPromptChars = Math.floor(value.maxPromptChars);
+        } else errors.push("todoContinuation.maxPromptChars must be a positive number");
       }
     }
   }

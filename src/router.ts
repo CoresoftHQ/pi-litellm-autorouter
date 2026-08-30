@@ -4,10 +4,11 @@
  * Order matches LiteLLM's `async_pre_routing_hook` / `_classify_and_route`, which is
  * load-bearing rather than incidental:
  *
- *   1. session-affinity pin              (skips classification entirely)
- *   2. plan-mode floor, when it is the top configured tier (skips the classifier call)
- *   3. keyword tier rules
- *   4. classifier (llm, falling back per `classifierFallback`; else heuristic)
+ *   1. active-todo continuation floor    (short approvals stay on the active work's tier)
+ *   2. session-affinity pin              (skips classification entirely)
+ *   3. plan-mode floor, when it is the top configured tier (skips the classifier call)
+ *   4. keyword tier rules
+ *   5. classifier (llm, falling back per `classifierFallback`; else heuristic)
  *   then: escalation keyword (+1 tier), then plan-mode floor
  *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
  *
@@ -29,6 +30,7 @@ import type { SemanticMatcher } from "./classify/semantic.ts";
 import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier, defaultTarget } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
+import { todoContinuationTier } from "./todo.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
 
 export interface SessionPin {
@@ -45,6 +47,8 @@ export interface RouteInput {
   registry?: ClassifierRegistry;
   /** pi's own plan-mode state, read directly rather than sniffed out of prompt text. */
   planModeActive?: boolean;
+  /** True when the latest persisted todo-tool snapshot has pending or in-progress tasks. */
+  todoActive?: boolean;
   /** The active session pin, if session affinity is on and one has been set. */
   pin?: SessionPin | null;
   /** A model the user forced for this one prompt via `/autoroute next`. Outranks
@@ -217,7 +221,21 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const planSentinel = planModeSignal(input);
   const planFloor = planSentinel !== null ? config.planModeMinTier : null;
 
-  // ── 1. Session-affinity pin ────────────────────────────────────────────────
+  // ── 1. Active-todo continuation floor ─────────────────────────────────────
+  // A bare approval following a persisted todo plan inherits that plan's minimum tier.
+  // It deliberately outranks a session pin: a session can start with a trivial request,
+  // then acquire complex work and a todo list later.
+  const todoTier = todoContinuationTier(turn.currentAsk, input.todoActive === true, config.todoContinuation);
+  if (todoTier) {
+    const tier = applyFloor(todoTier, planFloor);
+    decision.cause = tier === todoTier ? "active_todo_continuation" : "plan_mode";
+    decision.planFloored = tier !== todoTier;
+    decision.matchedKeyword = tier === todoTier ? config.todoContinuation.toolName : planSentinel;
+    decision.signals = ["active_todo_continuation"];
+    return finish(tier, null);
+  }
+
+  // ── 2. Session-affinity pin ────────────────────────────────────────────────
   const pin = input.pin;
   if (config.sessionAffinity && pin && pin.expiresAt > now()) {
     if (escalationKeyword && pin.tier) {
@@ -250,7 +268,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(null, null);
   }
 
-  // ── 2. Plan-mode floor, when nothing could outrank it ──────────────────────
+  // ── 3. Plan-mode floor, when nothing could outrank it ──────────────────────
   if (planFloor && floorIsTopConfiguredTier(config)) {
     decision.cause = "plan_mode";
     decision.planFloored = true;
@@ -258,7 +276,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(planFloor, null);
   }
 
-  // ── 3. Keyword tier rules ──────────────────────────────────────────────────
+  // ── 4. Keyword tier rules ──────────────────────────────────────────────────
   const { override, failure: overrideFailure } = await resolveKeywordTierOverride(
     turn.currentAsk,
     config,
@@ -283,7 +301,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(tier, null);
   }
 
-  // ── 4. Classifier ──────────────────────────────────────────────────────────
+  // ── 5. Classifier ──────────────────────────────────────────────────────────
   const classification = await classify(input);
 
   if ("failed" in classification) {

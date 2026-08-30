@@ -113,6 +113,23 @@ describe("route — precedence", () => {
     expect(decision.escalated).toBe(false);
   });
 
+  it("routes a brief acknowledgement to the active todo floor", async () => {
+    const api = applier();
+    const cfg = config({ todoContinuation: { enabled: true } });
+    const { decision } = await route({ turn: turn("ok"), config: cfg, api, todoActive: true, now });
+    expect(decision.cause).toBe("active_todo_continuation");
+    expect(decision.tier).toBe("COMPLEX");
+    expect(decision.chosenModel).toBe("anthropic/sonnet");
+  });
+
+  it("does not floor a substantive new request while todos are active", async () => {
+    const api = applier();
+    const cfg = config({ todoContinuation: { enabled: true } });
+    const { decision } = await route({ turn: turn("what time is it?"), config: cfg, api, todoActive: true, now });
+    expect(decision.cause).toBe("heuristic_scorer");
+    expect(decision.tier).toBe("SIMPLE");
+  });
+
   it("raises a low classification to the plan-mode floor", async () => {
     const api = applier();
     const cfg = config({ planMode: { minTier: "COMPLEX" } });

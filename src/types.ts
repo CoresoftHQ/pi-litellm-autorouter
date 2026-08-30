@@ -78,6 +78,7 @@ export type DecisionCause =
   | "literal_keyword_match"
   | "semantic_keyword_match"
   | "plan_mode"
+  | "active_todo_continuation"
   | "session_affinity_pin"
   | "session_affinity_escalation"
   | "default_fallback"

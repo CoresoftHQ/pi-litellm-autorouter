@@ -153,6 +153,15 @@ describe("buildConfig", () => {
     expect(config.enabled).toBe(false);
   });
 
+  it("parses todo-continuation settings and rejects invalid values", () => {
+    const { config, errors } = buildConfig([
+      { ...base, todoContinuation: { enabled: true, toolName: "tasks", minTier: "REASONING", maxPromptChars: 60 } },
+    ]);
+    expect(errors).toEqual([]);
+    expect(config.todoContinuation).toEqual({ enabled: true, toolName: "tasks", minTier: "REASONING", maxPromptChars: 60 });
+    expect(buildConfig([{ ...base, todoContinuation: { minTier: "HUGE" } }]).errors.join()).toContain("todoContinuation.minTier");
+  });
+
   it("parses the adaptive knobs and per-model preferences", () => {
     const { config, errors } = buildConfig([
       {

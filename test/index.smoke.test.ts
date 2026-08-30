@@ -186,6 +186,36 @@ describe("extension wiring", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalled();
   });
 
+  it("uses the persisted todo snapshot to route a brief continuation", async () => {
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify({
+      ...CONFIG,
+      todoContinuation: { enabled: true, minTier: "COMPLEX" },
+    }));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir, {
+      sessionManager: {
+        getBranch: () => [{
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolName: "todo",
+            details: { tasks: [{ id: 1, status: "in_progress" }] },
+          },
+        }],
+        getEntries: () => [],
+        getSessionFile: () => "/tmp/session.jsonl",
+      },
+    });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "ok", source: "interactive" }, ctx);
+
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.cause).toBe("active_todo_continuation");
+    expect(decision.tier).toBe("COMPLEX");
+  });
+
   it("routes a hard prompt to the top tier and applies its thinking level", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
