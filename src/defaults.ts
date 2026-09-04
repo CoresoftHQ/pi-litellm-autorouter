@@ -183,6 +183,20 @@ export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 3000;
 /** TTL for a session-affinity pin, refreshed on every hit. */
 export const DEFAULT_SESSION_AFFINITY_TTL_SECONDS = 3600;
 
+/** Tools whose call means the assistant is waiting on an answer. Compared on letters and
+ *  digits only, so `askUserQuestion` and `AskUserQuestion` match the first entry too. */
+export const DEFAULT_QUESTION_TOOL_NAMES: readonly string[] = [
+  "ask_user_question",
+  "ask_question",
+  "ask_followup_question",
+];
+
+/** Longest reply still read as an answer rather than a request of its own.
+ *  Tight on purpose: "now refactor the whole auth layer to use JWT" is 44 characters, so a
+ *  generous cap would swallow exactly the turns that most need their own decision. The
+ *  answers this protects ("ok", "option 2", "use postgres") are far shorter than that. */
+export const DEFAULT_QUESTION_REPLY_MAX_CHARS = 120;
+
 /** The reminder-block delimiters pi itself emits. Replaced wholesale, never extended,
  *  when `reminderMarkers` is configured. */
 export const DEFAULT_REMINDER_MARKERS: readonly { open: string; close: string }[] = [

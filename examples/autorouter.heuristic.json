@@ -39,5 +39,8 @@
   "sessionAffinity": {
     "enabled": false,
     "ttlSeconds": 3600
+  },
+  "questionReply": {
+    "enabled": true
   }
 }

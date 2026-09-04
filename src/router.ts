@@ -4,9 +4,10 @@
  * Order matches LiteLLM's `async_pre_routing_hook` / `_classify_and_route`, which is
  * load-bearing rather than incidental:
  *
- *   1. session-affinity pin              (skips classification entirely)
- *   2. plan-mode floor, when it is the top configured tier (skips the classifier call)
- *   3. keyword tier rules
+ *   1. question reply                    (holds the model, skips classification entirely)
+ *   2. session-affinity pin              (skips classification entirely)
+ *   3. plan-mode floor, when it is the top configured tier (skips the classifier call)
+ *   4. keyword tier rules
  *   4. classifier (llm, falling back per `classifierFallback`; else heuristic)
  *   then: escalation keyword (+1 tier), then plan-mode floor
  *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
@@ -38,6 +39,16 @@ export interface SessionPin {
   expiresAt: number;
 }
 
+/** A turn that answers a pending question rather than asking for something new. */
+export interface QuestionReplySignal {
+  /** The tool that asked, for the decision log. */
+  toolName: string;
+  /** Tier the session was last routed to. The reply's own content says nothing about the
+   *  work in flight, so this is the only tier the turn can honestly be escalated or
+   *  floored from; when it is unknown, the model is held instead of guessed at. */
+  lastTier: Tier | null;
+}
+
 export interface RouteInput {
   turn: ExtractedTurn;
   config: RouterConfig;
@@ -47,6 +58,9 @@ export interface RouteInput {
   planModeActive?: boolean;
   /** The active session pin, if session affinity is on and one has been set. */
   pin?: SessionPin | null;
+  /** Set when this turn only answers a question the assistant asked. Detection lives in
+   *  `question-reply.ts`; the router just honours it. */
+  questionReply?: QuestionReplySignal | null;
   /** A model the user forced for this one prompt via `/autoroute next`. Outranks
    *  everything, including the plan-mode floor and a session pin. */
   oneShot?: string | null;
@@ -217,7 +231,53 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   const planSentinel = planModeSignal(input);
   const planFloor = planSentinel !== null ? config.planModeMinTier : null;
 
-  // ── 1. Session-affinity pin ────────────────────────────────────────────────
+  // ── 1. Question reply ──────────────────────────────────────────────────────
+  // "ok" is not a request for cheap work, it is the second half of the request already in
+  // flight. Scoring it would drop the session onto the SIMPLE tier and then hand the
+  // answer to that model, which is the opposite of what answering a question is for. So
+  // the turn is not classified at all and no model is applied: whatever asked the question
+  // is what acts on the answer.
+  //
+  // Ranked above the session pin because holding is the stronger guarantee — a pin
+  // re-applies a model, this leaves the live one untouched — and below the one-shot
+  // override, which is the user naming a model outright.
+  const questionReply = input.questionReply;
+  if (questionReply) {
+    const { toolName, lastTier } = questionReply;
+    decision.signals = [...decision.signals, `question_reply (${toolName})`];
+
+    // An escalation keyword in the reply is a deliberate "go bigger", so it still moves —
+    // but from the tier the session is already on, never from the reply's own trivially
+    // low classification, which would escalate "PI ESCALATE ok" from SIMPLE to MEDIUM and
+    // call that a promotion.
+    if (escalationKeyword && lastTier) {
+      const tier = escalateTier(lastTier);
+      decision.cause = "question_reply_escalation";
+      decision.escalated = true;
+      return finish(tier, null);
+    }
+
+    // A plan-mode floor entered while the question was open still applies. It can only
+    // raise, so honouring it can never cost the user the model they were mid-task on.
+    if (planFloor && lastTier && applyFloor(lastTier, planFloor) !== lastTier) {
+      const tier = applyFloor(lastTier, planFloor);
+      decision.cause = "plan_mode";
+      decision.planFloored = true;
+      decision.matchedKeyword = planSentinel;
+      return finish(tier, null);
+    }
+
+    // The hold itself. No candidate is resolved and `setModel` is never called, so this is
+    // the one path that cannot change the session's model even by falling back. `tier`
+    // carries the last known tier forward so a run of consecutive replies still has
+    // something to escalate from.
+    decision.cause = "question_reply";
+    decision.tier = lastTier;
+    decision.latencyMs = now() - startedAt;
+    return { decision, pinToWrite: null, consumedOneShot };
+  }
+
+  // ── 2. Session-affinity pin ────────────────────────────────────────────────
   const pin = input.pin;
   if (config.sessionAffinity && pin && pin.expiresAt > now()) {
     if (escalationKeyword && pin.tier) {
@@ -250,7 +310,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(null, null);
   }
 
-  // ── 2. Plan-mode floor, when nothing could outrank it ──────────────────────
+  // ── 3. Plan-mode floor, when nothing could outrank it ──────────────────────
   if (planFloor && floorIsTopConfiguredTier(config)) {
     decision.cause = "plan_mode";
     decision.planFloored = true;
@@ -258,7 +318,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(planFloor, null);
   }
 
-  // ── 3. Keyword tier rules ──────────────────────────────────────────────────
+  // ── 4. Keyword tier rules ──────────────────────────────────────────────────
   const { override, failure: overrideFailure } = await resolveKeywordTierOverride(
     turn.currentAsk,
     config,
@@ -283,7 +343,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     return finish(tier, null);
   }
 
-  // ── 4. Classifier ──────────────────────────────────────────────────────────
+  // ── 5. Classifier ──────────────────────────────────────────────────────────
   const classification = await classify(input);
 
   if ("failed" in classification) {
