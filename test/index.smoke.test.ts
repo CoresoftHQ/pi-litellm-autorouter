@@ -22,6 +22,7 @@ function mockPi() {
   const handlers = new Map<string, Handler[]>();
   /** Set by a test to make setModel raise model_select, the way real pi does. */
   let modelSelectEcho = false;
+  let setModelSucceeds = true;
   let echoCtx: unknown = {};
   const busHandlers = new Map<string, ((payload: unknown) => void)[]>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
@@ -57,12 +58,12 @@ function mockPi() {
       // the test body is what makes the echo-suppression path testable at all: at this
       // moment the extension has not yet recorded the decision, which is exactly the
       // window in which a naive guard mistakes our own call for the user's.
-      if (modelSelectEcho) {
+      if (setModelSucceeds && modelSelectEcho) {
         for (const handler of handlers.get("model_select") ?? []) {
           await handler({ source: "set", model }, echoCtx);
         }
       }
-      return true;
+      return setModelSucceeds;
     }),
     setThinkingLevel: vi.fn((level: string) => thinkingCalls.push(level)),
     registerProvider: vi.fn(),
@@ -83,6 +84,10 @@ function mockPi() {
     echoCtx = ctx;
   };
 
+  const setModelAvailability = (available: boolean): void => {
+    setModelSucceeds = available;
+  };
+
   return {
     pi,
     fire,
@@ -95,6 +100,7 @@ function mockPi() {
     flags,
     handlers,
     enableModelSelectEcho,
+    setModelAvailability,
   };
 }
 
@@ -184,6 +190,25 @@ describe("extension wiring", () => {
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.chosenModel).toBe("anthropic/haiku");
     expect(ctx.ui.setStatus).toHaveBeenCalled();
+  });
+
+  it("notifies the user when no configured model can be applied", async () => {
+    const m = mockPi();
+    m.setModelAvailability(false);
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.chosenModel).toBeNull();
+    expect(decision.fellBackBecause).toContain("has no available credentials");
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("autoroute", "autoroute error: anthropic/haiku unavailable");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "autoroute: SIMPLE tier could not use anthropic/haiku (no available credentials). Keeping current model. Run /autoroute explain for all attempted models.",
+      "error",
+    );
   });
 
   it("routes a hard prompt to the top tier and applies its thinking level", async () => {

@@ -28,6 +28,8 @@ import {
   decisionLogLine,
   explain,
   renderAdaptiveSnapshot,
+  routingFailureNotice,
+  classifierFallbackNotice,
   renderDecisionEntry,
   statusLine,
 } from "./decision.ts";
@@ -288,7 +290,16 @@ export default function autorouter(pi: ExtensionAPI): void {
 
       pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, result.decision);
       logDecisionToConsole(result.decision, ctx);
-      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
+        // A failed model application otherwise leaves pi on its existing model with no
+        // visible indication why routing did not take effect. The full candidate failures
+        // remain in the decision entry and `/autoroute explain`; keep the toast actionable.
+        const failureNotice = !result.decision.chosenModel ? routingFailureNotice(result.decision) : null;
+        if (failureNotice) ctx.ui.notify(failureNotice, "error");
+        const classifierNotice = classifierFallbackNotice(result.decision);
+        if (classifierNotice) ctx.ui.notify(classifierNotice, "warning");
+      }
     } catch (err) {
       // Choosing a model is a routing decision; no failure in it may fail the user's turn.
       applyingOwnModel = false;

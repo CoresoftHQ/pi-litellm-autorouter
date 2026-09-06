@@ -23,12 +23,40 @@ export interface AutorouteState {
   nextModel?: string | null;
 }
 
+/** The first failed candidate, carried in `fellBackBecause` by `applyFirstUsable`. */
+function firstFailedCandidate(decision: RouteDecision): { model: string; reason: string } | null {
+  const first = decision.fellBackBecause?.split("; ")[0];
+  if (!first) return null;
+  const match = /^"([^"]+)" (.+)$/.exec(first);
+  return match ? { model: match[1]!, reason: match[2]! } : null;
+}
+
+/** A concise, actionable failure toast; `/autoroute explain` contains the entire chain. */
+export function routingFailureNotice(decision: RouteDecision): string | null {
+  const failure = firstFailedCandidate(decision);
+  if (!failure) return null;
+  const target = decision.tier ? `${decision.tier} tier` : "default route";
+  const reason = failure.reason.replace(/^has /, "");
+  return `autoroute: ${target} could not use ${failure.model} (${reason}). Keeping current model. Run /autoroute explain for all attempted models.`;
+}
+
+/** A non-fatal warning when the configured LLM classifier was bypassed. */
+export function classifierFallbackNotice(decision: RouteDecision): string | null {
+  const signal = decision.signals.find((value) => value.startsWith("llm_fallback ("));
+  if (!signal) return null;
+  const reason = signal.slice("llm_fallback (".length, -1);
+  return `autoroute: LLM classifier unavailable; used heuristic classification instead (${reason}).`;
+}
+
 /** Compact footer text: `⏵ COMPLEX · claude-sonnet-5`. */
 export function statusLine(decision: RouteDecision): string {
   if (!decision.chosenModel) {
-    // A hold is a decision, not an absence of one, and the footer is the only place the
-    // user sees why their model stayed put mid-question.
-    return decision.cause === "question_reply" ? "autoroute: held (question reply)" : "autoroute: no change";
+    // A hold is intentional; an exhausted candidate list is not. Keep the latter visible
+    // in the footer rather than presenting it as the same benign "no change" state.
+    if (decision.cause === "question_reply") return "autoroute: held (question reply)";
+    const failure = firstFailedCandidate(decision);
+    if (failure) return `autoroute error: ${failure.model} unavailable`;
+    return "autoroute: no change";
   }
   const model = decision.chosenModel.split("/").slice(1).join("/") || decision.chosenModel;
   const parts = [decision.tier ?? decision.cause, model];
