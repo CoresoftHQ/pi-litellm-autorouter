@@ -31,8 +31,9 @@ import {
   renderDecisionEntry,
   statusLine,
 } from "./decision.ts";
-import { extractTurn, type SimpleMessage } from "./extract.ts";
+import { extractTurn, stripReminderBlocks, type SimpleMessage } from "./extract.ts";
 import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
+import { detectQuestionReply } from "./question-reply.ts";
 import { type SessionPin, route } from "./router.ts";
 import type { RouteDecision } from "./types.ts";
 
@@ -47,8 +48,14 @@ export default function autorouter(pi: ExtensionAPI): void {
   let state: AutorouteState = {};
   let pin: SessionPin | null = null;
   let lastDecision: RouteDecision | null = null;
-  /** The ask the last decision was made on; what the bandit credits feedback against. */
+  /** The ask the last decision was made on; what the bandit credits feedback against.
+   *  A held turn deliberately leaves this alone: "ok" describes no work, so feedback from
+   *  the run it triggers belongs to the request that was already in flight. */
   let lastRoutedAsk: string | null = null;
+  /** The last model the router actually applied. Distinct from `lastDecision.chosenModel`,
+   *  which is null on a held turn — the bandit still has to credit the run to the model
+   *  that served it. */
+  let lastAppliedModel: string | null = null;
   let adaptive: AdaptiveRouter | null = null;
   const adaptiveStorePath = defaultAdaptiveStorePath();
   let semantic: SemanticMatcher | null = null;
@@ -105,12 +112,19 @@ export default function autorouter(pi: ExtensionAPI): void {
     state = {};
     pin = null;
     lastDecision = null;
+    lastAppliedModel = null;
     try {
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type !== "custom") continue;
         const custom = entry as { customType?: string; data?: unknown };
         if (custom.customType === STATE_ENTRY_TYPE && custom.data) {
           state = { ...state, ...(custom.data as AutorouteState) };
+        }
+        // Decisions are replayed too, so a session resumed onto an open question still
+        // knows which tier it was on and can escalate from it rather than from nothing.
+        if (custom.customType === DECISION_ENTRY_TYPE && custom.data) {
+          lastDecision = custom.data as RouteDecision;
+          if (lastDecision.chosenModel) lastAppliedModel = lastDecision.chosenModel;
         }
       }
     } catch {
@@ -219,12 +233,26 @@ export default function autorouter(pi: ExtensionAPI): void {
     if ((disabled && !oneShot) || !config) return { action: "continue" as const };
 
     try {
-      const turn = extractTurn(event.text, sessionMessages(ctx), {
+      const messages = sessionMessages(ctx);
+      const turn = extractTurn(event.text, messages, {
         markerPairs: config.reminderMarkers,
         contextWindowSize: config.classifierContextWindowSize,
         perTurnChars: config.classifierContextPerTurnChars,
         includeAssistantTurns: config.classifierContextIncludeAssistantTurns,
       });
+
+      // Detection reads *this* turn's text, not `turn.currentAsk`: that field falls back to
+      // the newest prior ask when the prompt is reminder-only, and answering a question
+      // with the previous request's text would hold on the wrong grounds.
+      const pendingReply = detectQuestionReply(
+        stripReminderBlocks(event.text, config.reminderMarkers),
+        messages,
+        {
+          enabled: config.questionReply,
+          toolNames: config.questionReplyToolNames,
+          maxChars: config.questionReplyMaxChars,
+        },
+      );
 
       applyingOwnModel = true;
       const result = await route({
@@ -239,6 +267,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         planModeActive,
         pin,
         oneShot,
+        questionReply: pendingReply ? { toolName: pendingReply.toolName, lastTier: lastDecision?.tier ?? null } : null,
         callerSystemPrompt: undefined,
         adaptive,
         semantic,
@@ -246,7 +275,8 @@ export default function autorouter(pi: ExtensionAPI): void {
 
       applyingOwnModel = false;
       lastDecision = result.decision;
-      lastRoutedAsk = turn.currentAsk;
+      if (result.decision.chosenModel) lastAppliedModel = result.decision.chosenModel;
+      if (result.decision.cause !== "question_reply") lastRoutedAsk = turn.currentAsk;
       if (result.pinToWrite) pin = result.pinToWrite;
       if (result.consumedOneShot) {
         state.nextModel = null;
@@ -276,7 +306,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   // Upstream does this from the proxy's post-call hook; `agent_end` is pi's equivalent.
   pi.on("agent_end", async (event, ctx) => {
     if (!config?.adaptive || !adaptive) return;
-    const model = lastDecision?.chosenModel;
+    // A held turn applied no model, so the run is credited to the one still serving it.
+    const model = lastDecision?.chosenModel ?? lastAppliedModel;
     if (!model) return;
     try {
       const turn = turnFromRun(lastRoutedAsk, event.messages as never);

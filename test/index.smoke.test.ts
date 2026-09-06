@@ -202,6 +202,75 @@ describe("extension wiring", () => {
     expect(m.thinkingCalls).toEqual(["high"]);
   });
 
+  it("holds the model when the turn only answers an open question", async () => {
+    // The full path: a hard prompt puts the session on opus, the assistant asks a
+    // question, and "ok" arrives. Without the hold, "ok" scores SIMPLE and the answer is
+    // handed to haiku — the model the user was mid-task with is gone.
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const branch: unknown[] = [];
+    const ctx = mockCtx(dir, { sessionManager: { getBranch: () => branch, getEntries: () => [] } });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire(
+      "input",
+      { text: "think step by step and analyze this: weigh the options for our schema", source: "interactive" },
+      ctx,
+    );
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+
+    branch.push({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            name: "ask_user_question",
+            arguments: { questions: [{ options: [{ label: "Postgres" }, { label: "SQLite" }] }] },
+          },
+        ],
+      },
+    });
+
+    await m.fire("input", { text: "ok", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+    const decisions = m.entries.filter((e) => e.type === DECISION_ENTRY_TYPE).map((e) => e.data as RouteDecision);
+    expect(decisions.at(-1)?.cause).toBe("question_reply");
+    expect(decisions.at(-1)?.chosenModel).toBeNull();
+    expect(decisions.at(-1)?.tier).toBe("REASONING");
+  });
+
+  it("still routes a new instruction typed into an open question", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const branch: unknown[] = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "ask_user_question", arguments: {} }],
+        },
+      },
+    ];
+    const ctx = mockCtx(dir, { sessionManager: { getBranch: () => branch, getEntries: () => [] } });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.fire(
+      "input",
+      { text: "now refactor the whole auth layer to use JWT", source: "interactive" },
+      ctx,
+    );
+
+    // An open question does not turn the next real request into an answer: this one is
+    // classified and applied like any other.
+    expect(m.setModelCalls).toHaveLength(1);
+    const decision = m.entries.filter((e) => e.type === DECISION_ENTRY_TYPE).at(-1)?.data as RouteDecision;
+    expect(decision.cause).not.toBe("question_reply");
+    expect(decision.chosenModel).not.toBeNull();
+  });
+
   it("does not route when --no-autoroute is set", async () => {
     const m = mockPi();
     autorouter(m.pi as never);

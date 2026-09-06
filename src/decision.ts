@@ -25,7 +25,11 @@ export interface AutorouteState {
 
 /** Compact footer text: `⏵ COMPLEX · claude-sonnet-5`. */
 export function statusLine(decision: RouteDecision): string {
-  if (!decision.chosenModel) return "autoroute: no change";
+  if (!decision.chosenModel) {
+    // A hold is a decision, not an absence of one, and the footer is the only place the
+    // user sees why their model stayed put mid-question.
+    return decision.cause === "question_reply" ? "autoroute: held (question reply)" : "autoroute: no change";
+  }
   const model = decision.chosenModel.split("/").slice(1).join("/") || decision.chosenModel;
   const parts = [decision.tier ?? decision.cause, model];
   if (decision.escalated) parts.push("↑");

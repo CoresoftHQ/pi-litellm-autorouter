@@ -80,6 +80,8 @@ export type DecisionCause =
   | "plan_mode"
   | "session_affinity_pin"
   | "session_affinity_escalation"
+  | "question_reply"
+  | "question_reply_escalation"
   | "default_fallback"
   | "default_model_fallback"
   | "classifier_failed";

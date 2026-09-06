@@ -30,7 +30,9 @@ Each user prompt goes through: **extract → classify → override → select �
      lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
      to agent traffic.
 3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
-   escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
+   escape hatch, a [question reply](#question-replies) (a turn that only answers a question the assistant
+   asked keeps the model it was asked with), a session affinity pin (reuse the first turn's model for the
+   whole session, if enabled),
    `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
@@ -98,7 +100,8 @@ Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.
   ],
   "escalationKeywords": ["PI ESCALATE"],
   "planMode": { "minTier": "COMPLEX" },
-  "sessionAffinity": { "enabled": false, "ttlSeconds": 3600 }
+  "sessionAffinity": { "enabled": false, "ttlSeconds": 3600 },
+  "questionReply": { "enabled": true }
 }
 ```
 
@@ -194,6 +197,56 @@ rejected), but it can be extended:
 Entries are appended in order and deduplicated case-insensitively against the built-in list, so listing
 `"TCP"` when `"tcp"` is already built in changes nothing. Mirrors upstream's `custom_technical_keywords`.
 
+### Question replies
+
+On by default. When the assistant asks something with a question tool (`ask_user_question`, `ask_question`,
+`ask_followup_question`) and the next turn only *answers* it, the router holds the session's model instead of
+classifying the answer.
+
+Without this, a mid-task question is a downgrade trap. The prompt that started the work classified `COMPLEX`
+and put the session on Sonnet; the assistant asks "Postgres or SQLite?"; the user types `ok`. Scored on its
+own, `ok` is `SIMPLE` - so the session drops to Haiku, and Haiku is the model that then has to act on the
+answer. The turn carries no information about the work, so the honest thing is not to score it at all:
+
+```
+autoroute: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
+```
+
+`routed_model=(unchanged)` is literal: on this path no candidate is resolved and `pi.setModel()` is never
+called, so it is the one decision that cannot move the model even by falling back. The footer reads
+`autoroute: held (question reply)`.
+
+A turn has to pass **both** tests to be held:
+
+1. **A question is open** - the newest assistant message carries a question tool call. A tool that was
+   answered inline and acted on is followed by further assistant messages, so it no longer qualifies; this
+   can never fire on a terse prompt at the start of a session.
+2. **The reply reads as an answer** - it names one of the offered options (conclusive, at any length), or it
+   is short and does not open a unit of work. `ok`, `yes please`, `option 2`, `the first one`, `up to you`
+   and `use postgres` are answers. `now refactor the whole auth layer to use JWT` is not: it leads with a
+   task verb, so it is classified and routed like any other prompt even though a question was open.
+
+Escalation still works from the held tier - `PI ESCALATE` in a reply raises one tier above the tier the
+session was already on, not one tier above the reply's own trivial classification. A plan-mode floor entered
+while the question was open also still applies, since a floor can only raise.
+
+```json
+{
+  "questionReply": {
+    "enabled": true,
+    "toolNames": ["ask_user_question", "ask_question", "ask_followup_question"],
+    "maxReplyChars": 120
+  }
+}
+```
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | `"questionReply": false` is shorthand for turning the whole thing off |
+| `toolNames` | the three above | **Replaces** the list, so a custom question tool can be named on its own. Compared on letters and digits only, so `askUserQuestion` matches `ask_user_question` |
+| `maxReplyChars` | `120` | Longest reply still treated as an answer. Deliberately tight: a new instruction is often shorter than it looks, and a generous cap would swallow exactly the turns that need their own decision. Naming an offered option bypasses it |
+
 ### Semantic keyword matching
 
 By default `keywordTierRules` match literally (word-bounded, case-insensitive). With
@@ -284,6 +337,7 @@ autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_
 autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
 autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
 autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
 autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low
 ```
 
@@ -347,6 +401,11 @@ npm test           # vitest run
 ```
 
 ## Changelog
+### Unreleased
+* Question replies: answering a question the assistant asked with `ask_user_question` ("ok", "option 2")
+  no longer re-routes the turn, so a mid-task question can't downgrade the model that has to act on the
+  answer. See [Question replies](#question-replies).
+
 ### 1.1.0
 This version is all about upstream feature parity.
 

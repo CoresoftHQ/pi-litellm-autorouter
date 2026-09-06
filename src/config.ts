@@ -18,6 +18,8 @@ import {
   DEFAULT_CLASSIFIER_TIMEOUT_MS,
   DEFAULT_DIMENSION_WEIGHTS,
   DEFAULT_ESCALATION_KEYWORDS,
+  DEFAULT_QUESTION_REPLY_MAX_CHARS,
+  DEFAULT_QUESTION_TOOL_NAMES,
   DEFAULT_REMINDER_MARKERS,
   DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
   DEFAULT_TIER_BOUNDARIES,
@@ -89,6 +91,14 @@ export interface RouterConfig {
   planModePatterns: string[];
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
+  /** Hold the session's model when a turn only answers a question the assistant asked
+   *  with one of `questionReplyToolNames`. On by default: a downgrade mid-question is a
+   *  regression in every configuration, and holding costs nothing when it misfires. */
+  questionReply: boolean;
+  /** Tools whose call means a question is open. Matched case-insensitively. */
+  questionReplyToolNames: string[];
+  /** Longest reply still treated as an answer instead of a request of its own. */
+  questionReplyMaxChars: number;
   reminderMarkers: ReminderMarkerPair[];
   /** Thompson-sample within/across the tier pools instead of taking the first usable model. */
   adaptive: boolean;
@@ -173,6 +183,9 @@ export function defaultConfig(): RouterConfig {
     planModePatterns: [],
     sessionAffinity: false,
     sessionAffinityTtlSeconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
+    questionReply: true,
+    questionReplyToolNames: [...DEFAULT_QUESTION_TOOL_NAMES],
+    questionReplyMaxChars: DEFAULT_QUESTION_REPLY_MAX_CHARS,
     reminderMarkers: DEFAULT_REMINDER_MARKERS.map((m) => ({ ...m })),
     adaptive: false,
     adaptiveWeights: { ...DEFAULT_ADAPTIVE_WEIGHTS },
@@ -488,6 +501,41 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
       }
     } else {
       errors.push("sessionAffinity must be a boolean or { enabled, ttlSeconds }");
+    }
+  }
+
+  if (raw.questionReply !== undefined) {
+    if (typeof raw.questionReply === "boolean") {
+      config.questionReply = raw.questionReply;
+    } else if (isRecord(raw.questionReply)) {
+      if (typeof raw.questionReply.enabled === "boolean") {
+        config.questionReply = raw.questionReply.enabled;
+      }
+      if (raw.questionReply.toolNames !== undefined) {
+        const names = raw.questionReply.toolNames;
+        if (Array.isArray(names) && names.every((n) => typeof n === "string")) {
+          // Replaced wholesale rather than merged: an operator naming their harness's
+          // question tool means that list, and silently keeping the built-ins would make
+          // the setting impossible to narrow.
+          const cleaned = (names as string[]).map((n) => n.trim()).filter((n) => n.length > 0);
+          config.questionReplyToolNames = cleaned;
+          if (cleaned.length === 0) {
+            warnings.push("questionReply.toolNames is empty: no turn can be recognised as a reply");
+          }
+        } else {
+          errors.push("questionReply.toolNames must be an array of strings");
+        }
+      }
+      if (raw.questionReply.maxReplyChars !== undefined) {
+        const max = raw.questionReply.maxReplyChars;
+        if (typeof max === "number" && Number.isFinite(max) && max > 0) {
+          config.questionReplyMaxChars = Math.floor(max);
+        } else {
+          errors.push("questionReply.maxReplyChars must be a positive number");
+        }
+      }
+    } else {
+      errors.push("questionReply must be a boolean or { enabled, toolNames, maxReplyChars }");
     }
   }
 
