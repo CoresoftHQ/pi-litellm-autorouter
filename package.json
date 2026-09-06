@@ -1,6 +1,6 @@
 {
   "name": "@coresofthq/pi-litellm-autorouter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "LiteLLM's Auto Router v2, running inside the pi coding agent",
   "type": "module",
   "license": "MIT",

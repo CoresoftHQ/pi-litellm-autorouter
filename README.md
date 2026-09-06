@@ -20,29 +20,36 @@ the model that was actually picked.
 Each user prompt goes through: **extract → classify → override → select → apply**.
 
 1. **Extract** - strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
-   the current ask plus a few prior turns for context.
+ the current ask plus a few prior turns for context.
 2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`.
-   Two classifiers are supported:
-   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
-     technical terms, length, etc.), no API call.
-   - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
-     default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
-     lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
-     to agent traffic.
+ Two classifiers are supported:
+  - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
+   technical terms, length, etc.), no API call.
+  - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
+  default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
+  lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
+  to agent traffic.
 3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
+<<<<<<< HEAD
    escape hatch, a [question reply](#question-replies) (a turn that only answers a question the assistant
    asked keeps the model it was asked with), a session affinity pin (reuse the first turn's model for the
    whole session, if enabled),
    `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
    configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
    result up exactly one tier - never down, never a caller-chosen model.
+=======
+ escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
+ `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
+ configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
+ result up exactly one tier - never down, never a caller-chosen model.
+>>>>>>> 6d006fc (release: 1.2.0)
 4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or,
-   with `adaptive: true`,
-   a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
-   classified tier. See [Adaptive selection](#adaptive-selection).
+ with `adaptive: true`,
+ a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
+ classified tier. See [Adaptive selection](#adaptive-selection).
 5. **Apply** - resolve the chosen model against pi's own model registry and credentials, call
-   `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials), then
-   `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer status).
+ `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials), then
+ `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer status).
 
 Routing never fails a prompt: any classifier error or unresolved model falls back to `defaultModel`, and the
 model is chosen once per prompt and held for the whole agent turn (including all its tool calls) - it never
@@ -173,6 +180,7 @@ down the chain to the next usable candidate, and the decision log says so under 
 
 Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
 can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
+
 - e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
 configures the LLM classifier in one go. There's no separate command to flip classifier mode afterwards;
 re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in the config file.
@@ -268,16 +276,16 @@ in it ("help me roll out my k8s cluster") still hits a rule for `"kubernetes dep
 ```
 
 - One route per tier, that tier's keywords as its utterances, `max` aggregation: a prompt matches a tier when
-  it is close to *any* of the tier's keywords, and the closest tier wins if its similarity is at least
-  `matchThreshold`. Keywords are embedded once per session; only the prompt is embedded per turn.
+it is close to *any* of the tier's keywords, and the closest tier wins if its similarity is at least
+`matchThreshold`. Keywords are embedded once per session; only the prompt is embedded per turn.
 - With semantic matching on, literal matching is **not** consulted (as upstream). An embedding failure -
-  timeout, bad key, endpoint down - yields no override and the prompt falls through to the classifier; the
-  decision records why under `signals`.
+timeout, bad key, endpoint down - yields no override and the prompt falls through to the classifier; the
+decision records why under `signals`.
 - pi has no embeddings API, so the call goes straight to an OpenAI-compatible `/embeddings` endpoint.
-  `embeddingModel` is `provider/model-id`; the base URL comes from `embeddingEndpoint.baseUrl`, else the provider
-  pi knows by that name, else a built-in table (`voyage`, `openai`, `mistral`, `openrouter`, `together`,
-  `fireworks`, `google`). The key comes from `embeddingEndpoint.apiKeyEnv`, else pi's key for the provider,
-  else `<PROVIDER>_API_KEY`.
+`embeddingModel` is `provider/model-id`; the base URL comes from `embeddingEndpoint.baseUrl`, else the provider
+pi knows by that name, else a built-in table (`voyage`, `openai`, `mistral`, `openrouter`, `together`,
+`fireworks`, `google`). The key comes from `embeddingEndpoint.apiKeyEnv`, else pi's key for the provider,
+else `<PROVIDER>_API_KEY`.
 - Requires `embeddingModel` and at least one rule; `matchThreshold` is in `[0, 1]`.
 
 ### Adaptive selection
@@ -311,12 +319,12 @@ its cold-start phase (unobserved models in the classified tier are tried uniform
 
 - `adaptiveWeights` must sum to 1. The upstream complexity-router default leans on cost (0.3 / 0.7).
 - `adaptiveEligible: "all"` scores every pool model with the distance penalty, so a cheap model with a strong
-  posterior can win a `COMPLEX` prompt (a *soft* floor). `"classified_tier"` samples only inside the classified
-  tier's pool. The plan-mode floor is always hard: candidates below it are excluded outright.
+posterior can win a `COMPLEX` prompt (a *soft* floor). `"classified_tier"` samples only inside the classified
+tier's pool. The plan-mode floor is always hard: candidates below it are excluded outright.
 - `qualityTier` (1–3, default 2) and `strengths` on a tier entry set the cold-start prior, mirroring upstream's
-  `model_info.adaptive_router_preferences`. Prices come from pi's model registry.
+`model_info.adaptive_router_preferences`. Prices come from pi's model registry.
 - Only the classifier path is adaptive, as upstream: `keywordTierRules`, a session-affinity pin and the plan-mode
-  shortcut still take the plain uniform pool pick.
+shortcut still take the plain uniform pool pick.
 
 The bandit learns from what happens after each pick, using upstream's signal detectors on pi's `agent_end`
 event: a rephrase or a "forget it" in the next prompt counts against the model that produced the previous
@@ -345,27 +353,29 @@ pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallbac
 `signals`) appear only when set, after upstream's fields.
 
 - **Interactive mode**: the line is drawn dimly in the chat, just above the prompt it routed. It is a rendering
-  of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
-  model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
-  the full breakdown `/autoroute explain` would show.
-- **`pi -p` / RPC**: the line goes to **stderr**, keeping stdout clean for the agent's output.
+of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
+model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
+the full breakdown `/autoroute explain` would show.
+- `**pi -p` / RPC**: the line goes to **stderr**, keeping stdout clean for the agent's output.
 - `/autoroute log [n]` replays the session's decisions (or the last `n`) on demand.
 - `"decisionLog": false` silences both; decisions are still recorded and `/autoroute log` still works.
 
 ## Useful commands
 
-| Command | Purpose |
-|---|---|
-| `/autoroute` | Show current classifier, last decision, tier, and score |
-| `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach |
-| `/autoroute explain` | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
-| `/autoroute log [n]` | Replay the session's routing decisions as log lines |
-| `/autoroute adaptive` | The bandit's learned posteriors per request type and model |
-| `/autoroute next <model>` | Force a model for the next prompt only |
-| `/autoroute pin <model>` | Freeze on one model until unpinned |
-| `/autoroute escalate` | Re-run the last prompt one tier up |
-| `/autoroute off` / `on` | Toggle routing for the session |
-| `--no-autoroute` | CLI flag to start a session with routing disabled |
+
+| Command                                      | Purpose                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `/autoroute`                                 | Show current classifier, last decision, tier, and score                             |
+| `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach                                      |
+| `/autoroute explain`                         | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
+| `/autoroute log [n]`                         | Replay the session's routing decisions as log lines                                 |
+| `/autoroute adaptive`                        | The bandit's learned posteriors per request type and model                          |
+| `/autoroute next <model>`                    | Force a model for the next prompt only                                              |
+| `/autoroute pin <model>`                     | Freeze on one model until unpinned                                                  |
+| `/autoroute escalate`                        | Re-run the last prompt one tier up                                                  |
+| `/autoroute off` / `on`                      | Toggle routing for the session                                                      |
+| `--no-autoroute`                             | CLI flag to start a session with routing disabled                                   |
+
 
 ## Disabling the extension
 
@@ -374,11 +384,10 @@ stop the extension from loading at all - for instance because you'd rather let a
 do the routing - use pi's own mechanisms:
 
 - **Toggle it interactively**: run `pi config`, find the extension, and disable it. Tab switches between global
-  (`~/.pi/agent/settings.json`) and project-local (`.pi/settings.json`) scope; `pi config -l` starts in the
-  project scope.
+(`~/.pi/agent/settings.json`) and project-local (`.pi/settings.json`) scope; `pi config -l` starts in the
+project scope.
 - **Keep the package installed but load nothing from it**: use the object form in `settings.json`, which
-  filters what a package contributes:
-
+filters what a package contributes:
   ```json
   {
     "packages": [
@@ -401,24 +410,28 @@ npm test           # vitest run
 ```
 
 ## Changelog
-### Unreleased
-* Question replies: answering a question the assistant asked with `ask_user_question` ("ok", "option 2")
-  no longer re-routes the turn, so a mid-task question can't downgrade the model that has to act on the
-  answer. See [Question replies](#question-replies).
+
+### 1.2.0
+
+- Better support for todo tools. I.e. use the best model based on the todo item content, instead of using the current one
+- Improved handling off user question tools. Now it will choose the model based on the context of the task, instead of reclassifying based on an "ok" or "option 2" response.
 
 ### 1.1.0
+
 This version is all about upstream feature parity.
 
-* Decision log: The extension now writes what model was selected and why
-* Custom Technical Keywords: Append to the built in technical keywords list
-* Adaptive Mode: Pick tier/model from a configured pool
-* Semantic Keyword Matching: Use an embedding model to determine keyword matches for tier selection.
+- Decision log: The extension now writes what model was selected and why
+- Custom Technical Keywords: Append to the built in technical keywords list
+- Adaptive Mode: Pick tier/model from a configured pool
+- Semantic Keyword Matching: Use an embedding model to determine keyword matches for tier selection.
 
 ### 1.0.2
-* Removed proxy strategy, only local makes sense. if using external LiteLLM, just disable the extension.
+
+- Removed proxy strategy, only local makes sense. if using external LiteLLM, just disable the extension.
 
 ### 1.0.1
-* Initial NPM release
+
+- Initial NPM release
 
 ## Prior art
 
