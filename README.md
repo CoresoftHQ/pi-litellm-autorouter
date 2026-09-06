@@ -21,35 +21,27 @@ Each user prompt goes through: **extract → classify → override → select �
 
 1. **Extract** - strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
  the current ask plus a few prior turns for context.
-2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`.
- Two classifiers are supported:
+2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Two classifiers are supported:
   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
    technical terms, length, etc.), no API call.
   - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
   default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
   lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
   to agent traffic.
-3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or `--no-autoroute`
-<<<<<<< HEAD
-   escape hatch, a [question reply](#question-replies) (a turn that only answers a question the assistant
-   asked keeps the model it was asked with), a session affinity pin (reuse the first turn's model for the
-   whole session, if enabled),
-   `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
-   configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
-   result up exactly one tier - never down, never a caller-chosen model.
-=======
- escape hatch, a session affinity pin (reuse the first turn's model for the whole session, if enabled),
- `keywordTierRules` (keyword → tier, literal or [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a
- configured tier while a plan-mode extension or sentinel is active). `escalation_keywords` can bump the
- result up exactly one tier - never down, never a caller-chosen model.
->>>>>>> 6d006fc (release: 1.2.0)
-4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or,
- with `adaptive: true`,
- a Thompson-sampled pick across the pools weighted by learned quality, price, and distance from the
- classified tier. See [Adaptive selection](#adaptive-selection).
-5. **Apply** - resolve the chosen model against pi's own model registry and credentials, call
- `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials), then
- `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer status).
+3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or
+   `--no-autoroute` escape hatch, a [question reply](#question-replies) (a turn that only answers a
+   question the assistant asked keeps the model it was asked with), a session-affinity pin (reuse the
+   first turn's model for the whole session, if enabled), `keywordTierRules` (keyword → tier, literal or
+   [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a configured tier
+   while a plan-mode extension or sentinel is active). `escalationKeywords` can bump the result up exactly
+   one tier — never down or to a caller-chosen model.
+4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or, with
+   `adaptive: true`, a Thompson-sampled pick across the pools weighted by learned quality, price, and
+   distance from the classified tier. See [Adaptive selection](#adaptive-selection).
+5. **Apply** - resolve the chosen model against pi's own model registry and credentials; call
+   `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials),
+   then `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer
+   status).
 
 Routing never fails a prompt: any classifier error or unresolved model falls back to `defaultModel`, and the
 model is chosen once per prompt and held for the whole agent turn (including all its tool calls) - it never
@@ -249,11 +241,13 @@ while the question was open also still applies, since a floor can only raise.
 }
 ```
 
-| Key | Default | Purpose |
-|---|---|---|
-| `enabled` | `true` | `"questionReply": false` is shorthand for turning the whole thing off |
-| `toolNames` | the three above | **Replaces** the list, so a custom question tool can be named on its own. Compared on letters and digits only, so `askUserQuestion` matches `ask_user_question` |
-| `maxReplyChars` | `120` | Longest reply still treated as an answer. Deliberately tight: a new instruction is often shorter than it looks, and a generous cap would swallow exactly the turns that need their own decision. Naming an offered option bypasses it |
+
+| Key             | Default         | Purpose                                                                                                                                                                                                                               |
+| --------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`       | `true`          | `"questionReply": false` is shorthand for turning the whole thing off                                                                                                                                                                 |
+| `toolNames`     | the three above | **Replaces** the list, so a custom question tool can be named on its own. Compared on letters and digits only, so `askUserQuestion` matches `ask_user_question`                                                                       |
+| `maxReplyChars` | `120`           | Longest reply still treated as an answer. Deliberately tight: a new instruction is often shorter than it looks, and a generous cap would swallow exactly the turns that need their own decision. Naming an offered option bypasses it |
+
 
 ### Semantic keyword matching
 
@@ -363,18 +357,18 @@ the full breakdown `/autoroute explain` would show.
 ## Useful commands
 
 
-| Command                                      | Purpose                                                                             |
-| -------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `/autoroute`                                 | Show current classifier, last decision, tier, and score                             |
-| `/autoroute init [provider] [project] [llm]` | Generate a config from the models pi can reach                                      |
-| `/autoroute explain`                         | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
-| `/autoroute log [n]`                         | Replay the session's routing decisions as log lines                                 |
-| `/autoroute adaptive`                        | The bandit's learned posteriors per request type and model                          |
-| `/autoroute next <model>`                    | Force a model for the next prompt only                                              |
-| `/autoroute pin <model>`                     | Freeze on one model until unpinned                                                  |
-| `/autoroute escalate`                        | Re-run the last prompt one tier up                                                  |
-| `/autoroute off` / `on`                      | Toggle routing for the session                                                      |
-| `--no-autoroute`                             | CLI flag to start a session with routing disabled                                   |
+| Command                                                                                     | Purpose                                                                             |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `/autoroute`                                                                                | Show current classifier, last decision, tier, and score                             |
+| `/autoroute init [provider] [project] [llm]`                                                | Generate a config from the models pi can reach                                      |
+| `/autoroute explain`                                                                        | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
+| `/autoroute log [n]`                                                                        | Replay the session's routing decisions as log lines                                 |
+| `/autoroute adaptive`                                                                       | The bandit's learned posteriors per request type and model                          |
+| `/autoroute next <model>`                                                          | Force a model for the next prompt only                                              |
+| `/autoroute pin <model>`                                                           | Freeze on one model until unpinned                                                  |
+| `/autoroute escalate`                                                                       | Re-run the last prompt one tier up                                                  |
+| `/autoroute off` / `on`                                                                     | Toggle routing for the session                                                      |
+| `--no-autoroute`                                                                            | CLI flag to start a session with routing disabled                                   |
 
 
 ## Disabling the extension
@@ -410,6 +404,10 @@ npm test           # vitest run
 ```
 
 ## Changelog
+
+### 1.2.1
+
+- Notify when one or several of the configured models are unavailable
 
 ### 1.2.0
 
