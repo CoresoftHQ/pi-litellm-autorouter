@@ -138,6 +138,7 @@ describe("extension wiring", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
@@ -147,12 +148,17 @@ describe("extension wiring", () => {
     // loadConfig defaults to os.homedir(); point it at an empty dir so a developer's own
     // global config cannot influence the test.
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    // Node resolves os.homedir() from USERPROFILE on Windows, not HOME.
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -184,6 +190,30 @@ describe("extension wiring", () => {
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.chosenModel).toBe("anthropic/haiku");
     expect(ctx.ui.setStatus).toHaveBeenCalled();
+  });
+
+  it("routes when an optional todo task starts and records the decision on the task", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const task = { id: 7, subject: "Implement transaction protocol", description: "Design a durable recovery strategy.", status: "pending" };
+    const ctx = mockCtx(dir, {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "toolResult", toolName: "todo", details: { tasks: [task] } } },
+        ],
+        getEntries: () => [],
+        getSessionFile: () => "/tmp/session.jsonl",
+      },
+    });
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    const input: Record<string, unknown> = { action: "update", id: 7, status: "in_progress" };
+    await m.fire("tool_call", { toolName: "todo", input }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/sonnet"]);
+    expect(input.metadata).toEqual({
+      autorouter: expect.objectContaining({ model: "anthropic/sonnet", tier: "MEDIUM" }),
+    });
   });
 
   it("routes a hard prompt to the top tier and applies its thinking level", async () => {
@@ -608,6 +638,7 @@ describe("adaptive wiring", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   const ADAPTIVE_CONFIG = {
     ...CONFIG,
@@ -621,12 +652,16 @@ describe("adaptive wiring", () => {
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(ADAPTIVE_CONFIG));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -787,6 +822,7 @@ describe("decision log", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
@@ -794,12 +830,16 @@ describe("decision log", () => {
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });

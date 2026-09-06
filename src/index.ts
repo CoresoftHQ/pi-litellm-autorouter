@@ -35,6 +35,7 @@ import { extractTurn, stripReminderBlocks, type SimpleMessage } from "./extract.
 import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
 import { detectQuestionReply } from "./question-reply.ts";
 import { type SessionPin, route } from "./router.ts";
+import { cacheTodoTasks, taskStartingFromTodoInput, todoTaskText, type TodoTaskCache, withTodoRoutingMetadata } from "./todo-task.ts";
 import type { RouteDecision } from "./types.ts";
 
 const STATUS_KEY = "autoroute";
@@ -65,6 +66,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   /** True while our own setModel calls are in flight, so their model_select echoes are
    *  not mistaken for the user picking a model by hand. */
   let applyingOwnModel = false;
+  /** Snapshot supplied by the optional @juicesharp/rpiv-todo extension. */
+  const todoTasks: TodoTaskCache = new Map();
 
   pi.registerFlag("no-autoroute", {
     description: "Start with automatic model routing disabled",
@@ -161,6 +164,62 @@ export default function autorouter(pi: ExtensionAPI): void {
     return null;
   };
 
+  /** Rehydrate the optional todo extension's task snapshot from its tool results. */
+  const restoreTodoTasks = (ctx: ExtensionContext): void => {
+    todoTasks.clear();
+    try {
+      for (const entry of ctx.sessionManager.getBranch()) {
+        if (entry.type !== "message") continue;
+        const message = (entry as { message?: { role?: unknown; toolName?: unknown; details?: unknown } }).message;
+        if (message?.role === "toolResult" && message.toolName === "todo") cacheTodoTasks(message.details, todoTasks);
+      }
+    } catch {
+      // Todo is optional; unavailable history simply means an update cannot be task-routed.
+    }
+  };
+
+  /** Route the next model turn from a task's own text when rpiv-todo starts that task. */
+  const routeTodoTask = async (input: unknown, ctx: ExtensionContext): Promise<void> => {
+    if (routingDisabled() || !config) return;
+    const task = taskStartingFromTodoInput(input, todoTasks);
+    if (!task) return;
+
+    const taskText = todoTaskText(task);
+    applyingOwnModel = true;
+    try {
+      // A task is an intentional new unit of work, so it is classified independently of
+      // session affinity. A manual pin still disables this path via routingDisabled().
+      const result = await route({
+        turn: { currentAsk: taskText, priorTurns: [], conversationContinuing: true, cumulativeTokens: 0 },
+        config,
+        api: {
+          find: (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+          setModel: (model) => pi.setModel(model),
+          setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
+        },
+        registry: ctx.modelRegistry as never,
+        planModeActive,
+        pin: null,
+        adaptive,
+        semantic,
+      });
+      result.decision.signals = [...result.decision.signals, `todo_task (#${task.id})`];
+      lastDecision = result.decision;
+      if (result.decision.chosenModel) lastAppliedModel = result.decision.chosenModel;
+      lastRoutedAsk = taskText;
+      withTodoRoutingMetadata(input, {
+        model: result.decision.chosenModel,
+        tier: result.decision.tier,
+        cause: result.decision.cause,
+      });
+      pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, result.decision);
+      logDecisionToConsole(result.decision, ctx);
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
+    } finally {
+      applyingOwnModel = false;
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     const loaded = loadConfig(ctx.cwd);
     config = loaded.config;
@@ -168,6 +227,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configErrors = loaded.errors;
     configSources = loaded.sources;
     restoreState(ctx);
+    restoreTodoTasks(ctx);
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
     try {
@@ -180,6 +240,23 @@ export default function autorouter(pi: ExtensionAPI): void {
       // Loud, but not fatal: a broken router config must not stop the agent from starting.
       ctx.ui.notify(`autoroute disabled: ${configErrors[0]}`, "error");
     }
+  });
+
+  // The todo package is optional. When installed, task status updates give us a precise
+  // boundary for routing the next model turn; when absent these listeners never fire.
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "todo") return;
+    restoreTodoTasks(ctx);
+    try {
+      await routeTodoTask(event.input, ctx);
+    } catch (err) {
+      // Routing must not prevent the todo mutation itself from being recorded.
+      if (ctx.hasUI) ctx.ui.notify(`autoroute task routing failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  });
+
+  pi.on("tool_result", async (event, _ctx) => {
+    if (event.toolName === "todo") cacheTodoTasks(event.details, todoTasks);
   });
 
   // Plan mode is not a built-in pi concept — pi ships it as an extension — so there is no

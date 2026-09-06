@@ -197,6 +197,12 @@ rejected), but it can be extended:
 Entries are appended in order and deduplicated case-insensitively against the built-in list, so listing
 `"TCP"` when `"tcp"` is already built in changes nothing. Mirrors upstream's `custom_technical_keywords`.
 
+### Todo task routing
+
+When the separately installed [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) extension marks a task `in_progress`, autorouter classifies the task's subject and description and switches to the chosen model for the next agent turn. The decision is saved under the task's `metadata.autorouter` as its model, tier, and cause.
+
+This integration is optional: autorouter has no dependency on the todo package and runs normally when no `todo` tool is registered. It ignores task creation while a task is still `pending`, completion, and all other todo updates. A task created directly as `in_progress` is routed immediately. Manual model pins and disabling autoroute still take precedence.
+
 ### Question replies
 
 On by default. When the assistant asks something with a question tool (`ask_user_question`, `ask_question`,
