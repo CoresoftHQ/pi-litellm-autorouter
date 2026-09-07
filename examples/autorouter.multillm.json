@@ -28,7 +28,7 @@
     },
     "REASONING": {
       "model": "anthropic/claude-opus-5",
-      "thinkingLevel": "xhigh"
+      "thinkingLevel": "high"
     }
   }
 }

@@ -162,7 +162,7 @@ Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.js
     "SIMPLE": { "model": "openai/gpt-5.6-luna", "thinkingLevel": "low" },
     "MEDIUM": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
     "COMPLEX": { "model": "anthropic/claude-sonnet-5", "thinkingLevel": "high" },
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "xhigh" }
+    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
   }
 }
 ```

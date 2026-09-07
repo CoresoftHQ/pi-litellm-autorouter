@@ -355,6 +355,6 @@ describe("example configs", () => {
     expect(config.defaultModelThinkingLevel).toBe("medium");
     expect(config.classifierType).toBe("llm");
     expect(config.classifierLLMConfig?.model).toBe("mistral/mistral-small-2603");
-    expect(config.tiers.REASONING).toEqual([{ model: "anthropic/claude-opus-5", thinkingLevel: "xhigh" }]);
+    expect(config.tiers.REASONING).toEqual([{ model: "anthropic/claude-opus-5", thinkingLevel: "high" }]);
   });
 });
