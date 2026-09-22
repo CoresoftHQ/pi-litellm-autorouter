@@ -18,6 +18,7 @@
 
 import type { RouterConfig } from "./config.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
+import { JevClassifier } from "./classify/jev.ts";
 import { type ClassifierRegistry, classifyWithLLM } from "./classify/llm.ts";
 import {
   applyFloor,
@@ -54,6 +55,8 @@ export interface RouteInput {
   config: RouterConfig;
   api: ModelApplier;
   registry?: ClassifierRegistry;
+  /** Per-session TypeSafe System One classifier state, including its timeout breaker. */
+  jev?: JevClassifier;
   /** pi's own plan-mode state, read directly rather than sniffed out of prompt text. */
   planModeActive?: boolean;
   /** The active session pin, if session affinity is on and one has been set. */
@@ -130,10 +133,16 @@ async function classify(input: RouteInput): Promise<Classification | { failed: s
     const outcome = await classifyWithLLM(turn, config, registry, input.callerSystemPrompt);
     if (outcome.ok) return outcome.classification;
     if (config.classifierFallback === "default_model") return { failed: outcome.reason };
-    // "heuristic" fallback: score locally and carry on. The signal records that the LLM
-    // classifier was asked and did not answer.
     const heuristic = classifyHeuristic(turn.currentAsk, config);
     return { ...heuristic, signals: [...heuristic.signals, `llm_fallback (${outcome.reason})`] };
+  }
+
+  if (config.classifierType === "jev") {
+    const outcome = await (input.jev ?? new JevClassifier()).classify(turn, config, input.callerSystemPrompt);
+    if (outcome.ok) return outcome.classification;
+    if (config.classifierFallback === "default_model") return { failed: outcome.reason };
+    const heuristic = classifyHeuristic(turn.currentAsk, config);
+    return { ...heuristic, signals: [...heuristic.signals, `jev_fallback (${outcome.reason})`] };
   }
 
   return classifyHeuristic(turn.currentAsk, config);

@@ -28,6 +28,7 @@ Each user prompt goes through: **extract → classify → override → select �
   default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
   lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
   to agent traffic.
+  - `jev` - TypeSafe AI System One Choice selects a typed tier through its `/v1/systemone` API.
 3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or
    `--no-autoroute` escape hatch, a [question reply](#question-replies) (a turn that only answers a
    question the assistant asked keeps the model it was asked with), a session-affinity pin (reuse the
@@ -138,6 +139,30 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
   }
 }
 ```
+
+### Example: JEV classifier (TypeSafe AI)
+
+Set `TYPESAFE_API_KEY` in the environment running pi, then configure `classifierType: "jev"`.
+JEV uses the same classifier context settings and fallback behavior as `llm`; a timeout opens its
+per-session circuit breaker for 30 seconds by default. Full file:
+[`examples/autorouter.jev.json`](examples/autorouter.jev.json).
+
+```json
+{
+  "classifierType": "jev",
+  "jevClassifierConfig": {
+    "model": "jev-latest",
+    "timeoutMs": 3000,
+    "circuitBreakerEnabled": true,
+    "circuitBreakerCooldownSeconds": 30
+  },
+  "classifierFallback": "heuristic"
+}
+```
+
+`jevClassifierConfig.apiKeyEnv` can name a different key variable and `apiBase` overrides
+`TYPESAFE_API_BASE` (which otherwise defaults to `https://api.typesafe.ai`). `instructions` replaces the
+built-in JEV classification instructions; use it only when you are deliberately changing the taxonomy.
 
 ### Example: mixing providers
 

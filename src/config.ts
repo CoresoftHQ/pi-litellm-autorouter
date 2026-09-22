@@ -39,7 +39,7 @@ import {
   isTier,
 } from "./types.ts";
 
-export type ClassifierType = "heuristic" | "llm";
+export type ClassifierType = "heuristic" | "llm" | "jev";
 export type ClassifierFallback = "heuristic" | "default_model";
 export type ClassificationRubric = "legacy" | "agentic" | "chat" | "business";
 
@@ -59,6 +59,20 @@ export interface ClassifierLLMConfig {
   classificationRubric: ClassificationRubric;
   /** Replaces the built-in rubric entirely. See the warning in `validate`. */
   systemPrompt?: string;
+}
+
+export interface JevClassifierConfig {
+  /** TypeSafe System One model identifier (without a `typesafe/` prefix). */
+  model: string;
+  /** Environment variable containing the TypeSafe API key. */
+  apiKeyEnv: string;
+  /** TypeSafe base URL. Defaults to TYPESAFE_API_BASE or https://api.typesafe.ai. */
+  apiBase?: string;
+  timeoutMs: number;
+  /** Replaces the built-in complexity-classification instructions. */
+  instructions?: string;
+  circuitBreakerEnabled: boolean;
+  circuitBreakerCooldownSeconds: number;
 }
 
 export interface RouterConfig {
@@ -81,6 +95,7 @@ export interface RouterConfig {
   customTechnicalKeywords: string[];
   classifierType: ClassifierType;
   classifierLLMConfig: ClassifierLLMConfig | null;
+  jevClassifierConfig: JevClassifierConfig | null;
   classifierFallback: ClassifierFallback;
   classifierContextWindowSize: number;
   classifierContextPerTurnChars: number;
@@ -173,6 +188,7 @@ export function defaultConfig(): RouterConfig {
     customTechnicalKeywords: [],
     classifierType: "heuristic",
     classifierLLMConfig: null,
+    jevClassifierConfig: null,
     classifierFallback: "heuristic",
     classifierContextWindowSize: DEFAULT_CLASSIFIER_CONTEXT_WINDOW_SIZE,
     classifierContextPerTurnChars: DEFAULT_CLASSIFIER_CONTEXT_PER_TURN_CHARS,
@@ -353,10 +369,10 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   }
 
   if (raw.classifierType !== undefined) {
-    if (raw.classifierType === "heuristic" || raw.classifierType === "llm") {
+    if (raw.classifierType === "heuristic" || raw.classifierType === "llm" || raw.classifierType === "jev") {
       config.classifierType = raw.classifierType;
     } else {
-      errors.push(`classifierType must be "heuristic" or "llm"`);
+      errors.push(`classifierType must be "heuristic", "llm" or "jev"`);
     }
   }
 
@@ -412,6 +428,48 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
         );
       }
       config.classifierLLMConfig = llm;
+    }
+  }
+
+  if (raw.jevClassifierConfig !== undefined) {
+    const value = raw.jevClassifierConfig;
+    if (!isRecord(value)) {
+      errors.push("jevClassifierConfig must be an object");
+    } else {
+      const instructions = value.instructions;
+      if (instructions !== undefined && (typeof instructions !== "string" || !instructions.trim())) {
+        errors.push("jevClassifierConfig.instructions must be non-empty when set");
+      }
+      if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+        errors.push("jevClassifierConfig.model must be a non-empty string");
+      }
+      if (value.apiKeyEnv !== undefined && (typeof value.apiKeyEnv !== "string" || !value.apiKeyEnv.trim())) {
+        errors.push("jevClassifierConfig.apiKeyEnv must be a non-empty string");
+      }
+      if (value.apiBase !== undefined && (typeof value.apiBase !== "string" || !value.apiBase.trim())) {
+        errors.push("jevClassifierConfig.apiBase must be a non-empty string");
+      }
+      if (value.timeoutMs !== undefined && (typeof value.timeoutMs !== "number" || !Number.isFinite(value.timeoutMs) || value.timeoutMs <= 0)) {
+        errors.push("jevClassifierConfig.timeoutMs must be a positive number");
+      }
+      if (value.circuitBreakerEnabled !== undefined && typeof value.circuitBreakerEnabled !== "boolean") {
+        errors.push("jevClassifierConfig.circuitBreakerEnabled must be a boolean");
+      }
+      if (value.circuitBreakerCooldownSeconds !== undefined && (typeof value.circuitBreakerCooldownSeconds !== "number" || !Number.isFinite(value.circuitBreakerCooldownSeconds) || value.circuitBreakerCooldownSeconds <= 0)) {
+        errors.push("jevClassifierConfig.circuitBreakerCooldownSeconds must be a positive number");
+      }
+      config.jevClassifierConfig = {
+        model: typeof value.model === "string" && value.model.trim() ? value.model.trim() : "jev-latest",
+        apiKeyEnv: typeof value.apiKeyEnv === "string" && value.apiKeyEnv.trim() ? value.apiKeyEnv.trim() : "TYPESAFE_API_KEY",
+        ...(typeof value.apiBase === "string" && value.apiBase.trim() ? { apiBase: value.apiBase.trim() } : {}),
+        timeoutMs: typeof value.timeoutMs === "number" && value.timeoutMs > 0 ? Math.floor(value.timeoutMs) : DEFAULT_CLASSIFIER_TIMEOUT_MS,
+        ...(typeof instructions === "string" && instructions.trim() ? { instructions: instructions.trim() } : {}),
+        circuitBreakerEnabled: typeof value.circuitBreakerEnabled === "boolean" ? value.circuitBreakerEnabled : true,
+        circuitBreakerCooldownSeconds:
+          typeof value.circuitBreakerCooldownSeconds === "number" && value.circuitBreakerCooldownSeconds > 0
+            ? Math.floor(value.circuitBreakerCooldownSeconds)
+            : 30,
+      };
     }
   }
 
@@ -664,6 +722,9 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   // Cross-field checks.
   if (config.classifierType === "llm" && !config.classifierLLMConfig) {
     errors.push('classifierType is "llm" but classifierLLMConfig is missing');
+  }
+  if (config.classifierType === "jev" && !config.jevClassifierConfig) {
+    errors.push('classifierType is "jev" but jevClassifierConfig is missing');
   }
   const configuredTiers = TIER_SEVERITY_ORDER.filter((t) => config.tiers[t].length > 0);
   if (configuredTiers.length === 0 && !config.defaultModel) {

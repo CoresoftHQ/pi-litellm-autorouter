@@ -75,6 +75,7 @@ export type DecisionCause =
   | "heuristic_scorer"
   | "reasoning_override"
   | "llm_classifier"
+  | "jev_classifier"
   | "literal_keyword_match"
   | "semantic_keyword_match"
   | "plan_mode"
