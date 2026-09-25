@@ -7,7 +7,7 @@
 
 import type { CellSnapshot } from "./adaptive/router.ts";
 import type { RouterConfig } from "./config.ts";
-import { REQUEST_TYPES, type RouteDecision } from "./types.ts";
+import { REQUEST_TYPES, type RouteDecision, type TierTarget } from "./types.ts";
 
 export const DECISION_ENTRY_TYPE = "autoroute-decision";
 export const STATE_ENTRY_TYPE = "autoroute-state";
@@ -18,8 +18,10 @@ export interface AutorouteState {
   disabled?: boolean;
   /** A model the user pinned by hand; the router leaves the session alone while set. */
   pinnedModel?: string | null;
-  /** A model forced for the next prompt only, then cleared. Outranks everything else,
-   *  including `disabled` and `pinnedModel` — it is a deliberate one-off instruction. */
+  /** A model (and optional thinking level) forced for the next prompt only, then
+   *  cleared. Outranks everything else, including `disabled` and `pinnedModel`. */
+  nextTarget?: TierTarget | null;
+  /** Legacy string-only one-shot entries from versions before thinking overrides. */
   nextModel?: string | null;
 }
 

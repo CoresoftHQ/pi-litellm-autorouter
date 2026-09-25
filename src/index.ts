@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type RouterConfig, loadConfig } from "./config.ts";
+import { buildConfig, type RouterConfig, loadConfig } from "./config.ts";
 import { buildAdaptiveRouter, turnFromRun } from "./adaptive/index.ts";
 import { classifyRequestType } from "./adaptive/request-type.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
@@ -37,9 +37,88 @@ import { extractTurn, stripReminderBlocks, type SimpleMessage } from "./extract.
 import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
 import { detectQuestionReply } from "./question-reply.ts";
 import { type SessionPin, route } from "./router.ts";
-import type { RouteDecision } from "./types.ts";
+import { isThinkingLevel, isTier, type RouteDecision, type TierTarget } from "./types.ts";
 
 const STATUS_KEY = "autoroute";
+
+/** Convert validated config back to the documented JSON shape before command edits.
+ * Writing a complete project layer avoids shallow config merging dropping global nested
+ * fields (for example, three tiers when only `tiers.SIMPLE` was changed). */
+function configToJson(config: RouterConfig): Record<string, unknown> {
+  const tierValue = (targets: TierTarget[]): unknown =>
+    targets.length === 1 && Object.keys(targets[0]!).length === 1
+      ? targets[0]!.model
+      : targets.map((target) => ({ ...target }));
+  return {
+    enabled: config.enabled,
+    ...(config.defaultModel
+      ? {
+          defaultModel: config.defaultModelThinkingLevel
+            ? { model: config.defaultModel, thinkingLevel: config.defaultModelThinkingLevel }
+            : config.defaultModel,
+        }
+      : {}),
+    tiers: Object.fromEntries(Object.entries(config.tiers).map(([tier, targets]) => [tier, tierValue(targets)])),
+    tierBoundaries: config.tierBoundaries,
+    tokenThresholds: config.tokenThresholds,
+    dimensionWeights: config.dimensionWeights,
+    ...(config.reasoningOverrideMinScore !== null ? { reasoningOverrideMinScore: config.reasoningOverrideMinScore } : {}),
+    ...(config.codeKeywords ? { codeKeywords: config.codeKeywords } : {}),
+    ...(config.reasoningKeywords ? { reasoningKeywords: config.reasoningKeywords } : {}),
+    ...(config.simpleKeywords ? { simpleKeywords: config.simpleKeywords } : {}),
+    customTechnicalKeywords: config.customTechnicalKeywords,
+    classifierType: config.classifierType,
+    ...(config.classifierLLMConfig ? { classifierLLMConfig: config.classifierLLMConfig } : {}),
+    classifierFallback: config.classifierFallback,
+    classifierContextWindowSize: config.classifierContextWindowSize,
+    classifierContextPerTurnChars: config.classifierContextPerTurnChars,
+    classifierContextIncludeAssistantTurns: config.classifierContextIncludeAssistantTurns,
+    keywordTierRules: config.keywordTierRules,
+    escalationKeywords: config.escalationKeywords,
+    planMode: {
+      ...(config.planModeMinTier ? { minTier: config.planModeMinTier } : {}),
+      patterns: config.planModePatterns,
+    },
+    sessionAffinity: { enabled: config.sessionAffinity, ttlSeconds: config.sessionAffinityTtlSeconds },
+    questionReply: {
+      enabled: config.questionReply,
+      toolNames: config.questionReplyToolNames,
+      maxReplyChars: config.questionReplyMaxChars,
+    },
+    reminderMarkers: config.reminderMarkers,
+    adaptive: config.adaptive,
+    adaptiveWeights: config.adaptiveWeights,
+    tierDistancePenalty: config.tierDistancePenalty,
+    adaptiveEligible: config.adaptiveEligible,
+    semanticKeywordMatching: config.semanticKeywordMatching,
+    ...(config.embeddingModel ? { embeddingModel: config.embeddingModel } : {}),
+    matchThreshold: config.matchThreshold,
+    embeddingEndpoint: config.embeddingEndpoint,
+    decisionLog: config.decisionLog,
+  };
+}
+
+function setPath(object: Record<string, unknown>, path: string, value: unknown): boolean {
+  const parts = path.split(".").filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(part))) return false;
+  let cursor: Record<string, unknown> = object;
+  for (const part of parts.slice(0, -1)) {
+    const current = cursor[part];
+    if (current === undefined) cursor[part] = {};
+    else if (typeof current !== "object" || current === null || Array.isArray(current)) return false;
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts.at(-1)!] = value;
+  return true;
+}
+
+function readSettingValue(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
 
 export default function autorouter(pi: ExtensionAPI): void {
   let config: RouterConfig | null = null;
@@ -155,6 +234,31 @@ export default function autorouter(pi: ExtensionAPI): void {
     semantic = config ? buildSemanticMatcher(config, { registry: ctx.modelRegistry }) : null;
   };
 
+  const reloadConfig = (ctx: ExtensionContext): void => {
+    const loaded = loadConfig(ctx.cwd);
+    config = loaded.config;
+    configWarnings = loaded.warnings;
+    configErrors = loaded.errors;
+    configSources = loaded.sources;
+    rebuildAdaptive(ctx);
+    rebuildSemantic(ctx);
+  };
+
+  /** Persist one complete effective config layer and activate it immediately. */
+  const writeConfig = (scope: "global" | "project", updated: Record<string, unknown>, ctx: ExtensionContext): string | null => {
+    const target =
+      scope === "global" ? join(homedir(), ".pi", "agent", "autorouter.json") : join(ctx.cwd, ".pi", "autorouter.json");
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+      reloadConfig(ctx);
+      return target;
+    } catch (err) {
+      ctx.ui.notify(`autoroute: could not write settings: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return null;
+    }
+  };
+
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
     if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
@@ -229,7 +333,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     // A one-shot override is an explicit instruction for this prompt, so it is honoured
     // even when routing is otherwise off or pinned. It is checked before those, and always
     // cleared afterwards, so "off" still means off from the next prompt onwards.
-    const oneShot = state.nextModel ?? null;
+    const oneShot = state.nextTarget ?? (state.nextModel ? { model: state.nextModel } : null);
 
     const disabled = routingDisabled();
     if ((disabled && !oneShot) || !config) return { action: "continue" as const };
@@ -281,6 +385,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       if (result.decision.cause !== "question_reply") lastRoutedAsk = turn.currentAsk;
       if (result.pinToWrite) pin = result.pinToWrite;
       if (result.consumedOneShot) {
+        state.nextTarget = null;
         state.nextModel = null;
         persistState();
         if (ctx.hasUI && !result.decision.chosenModel) {
@@ -423,7 +528,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           .map((ref) => ({ value: `${verb} ${ref}`, label: ref }));
         return matches.length > 0 ? matches : null;
       }
-      const verbs = ["init", "next", "on", "off", "pin", "unpin", "explain", "log", "adaptive", "status"];
+      const verbs = ["init", "set", "tier", "next", "on", "off", "pin", "unpin", "explain", "log", "adaptive", "status"];
       const items = verbs.filter((v) => v.startsWith(prefix)).map((v) => ({ value: v, label: v }));
       return items.length > 0 ? items : null;
     },
@@ -435,34 +540,95 @@ export default function autorouter(pi: ExtensionAPI): void {
           await runInit(rest, ctx);
           return;
 
-        case "next": {
-          if (rest.length === 0) {
-            const had = state.nextModel;
-            state.nextModel = null;
-            persistState();
-            ctx.ui.notify(had ? `autoroute: cleared one-shot override (${had})` : "autoroute: no override set", "info");
+        case "set": {
+          const explicitScope = rest[0] === "global" || rest[0] === "project";
+          const scope: "global" | "project" = explicitScope ? rest[0]! as "global" | "project" : "project";
+          const path = rest[explicitScope ? 1 : 0];
+          const valueParts = rest.slice(explicitScope ? 2 : 1);
+          if (!path || valueParts.length === 0) {
+            ctx.ui.notify('usage: /autoroute set [global|project] <setting.path> <JSON value>', "info");
             return;
           }
-          const target = rest.join(" ");
-          const ref = splitModelRef(target);
+          const updated = configToJson(config ?? loadConfig(ctx.cwd).config);
+          // A missing or previously-invalid config is disabled by the loader. A successful
+          // settings edit is an explicit recovery action, except when it itself sets enabled.
+          if (path !== "enabled") updated.enabled = true;
+          if (!setPath(updated, path, readSettingValue(valueParts.join(" ")))) {
+            ctx.ui.notify(`autoroute: invalid setting path "${path}"`, "error");
+            return;
+          }
+          const checked = buildConfig([updated]);
+          if (checked.errors.length > 0) {
+            ctx.ui.notify(`autoroute: setting was not saved: ${checked.errors.join("; ")}`, "error");
+            return;
+          }
+          const target = writeConfig(scope, configToJson(checked.config), ctx);
+          if (target) ctx.ui.notify(`autoroute: set ${path} in ${scope} settings (${target})`, "info");
+          return;
+        }
+
+        case "tier": {
+          const [tierName, model, thinking] = rest;
+          if (!tierName || !model || rest.length > 3 || !isTier(tierName)) {
+            ctx.ui.notify("usage: /autoroute tier <SIMPLE|MEDIUM|COMPLEX|REASONING> <provider/model> [thinking-level]", "info");
+            return;
+          }
+          if (thinking !== undefined && !isThinkingLevel(thinking)) {
+            ctx.ui.notify("autoroute: thinking level must be one of off, minimal, low, medium, high, xhigh, max", "error");
+            return;
+          }
+          const ref = splitModelRef(model);
+          if (!ref || !ctx.modelRegistry.find(ref.provider, ref.modelId)) {
+            ctx.ui.notify(`autoroute: "${model}" is not a model pi knows.`, "error");
+            return;
+          }
+          const updated = configToJson(config ?? loadConfig(ctx.cwd).config);
+          updated.enabled = true;
+          setPath(updated, `tiers.${tierName}`, thinking ? { model, thinkingLevel: thinking } : model);
+          const checked = buildConfig([updated]);
+          if (checked.errors.length > 0) {
+            ctx.ui.notify(`autoroute: tier was not saved: ${checked.errors.join("; ")}`, "error");
+            return;
+          }
+          const target = writeConfig("project", configToJson(checked.config), ctx);
+          if (target) ctx.ui.notify(`autoroute: ${tierName} → ${model}${thinking ? ` (${thinking})` : ""}`, "info");
+          return;
+        }
+
+        case "next": {
+          if (rest.length === 0) {
+            const had = state.nextTarget;
+            state.nextTarget = null;
+            state.nextModel = null;
+            persistState();
+            ctx.ui.notify(had ? `autoroute: cleared one-shot override (${had.model})` : "autoroute: no override set", "info");
+            return;
+          }
+          const [model, thinking] = rest;
+          if (!model || rest.length > 2 || (thinking !== undefined && !isThinkingLevel(thinking))) {
+            ctx.ui.notify("usage: /autoroute next <provider/model> [thinking-level]", "info");
+            return;
+          }
+          const ref = splitModelRef(model);
           // Validate now rather than at the next prompt: a typo should fail while the user
           // is still looking at the command, not silently route the prompt they cared about.
           if (!ref || !ctx.modelRegistry.find(ref.provider, ref.modelId)) {
             ctx.ui.notify(
-              `autoroute: "${target}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`,
+              `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`,
               "error",
             );
             return;
           }
-          state.nextModel = target;
+          state.nextTarget = thinking ? { model, thinkingLevel: thinking } : { model };
           persistState();
-          ctx.ui.notify(`autoroute: next prompt only → ${target}`, "info");
+          ctx.ui.notify(`autoroute: next prompt only → ${model}${thinking ? ` (${thinking})` : ""}`, "info");
           return;
         }
 
         case "on":
           state.disabled = false;
           state.pinnedModel = null;
+          state.nextTarget = null;
           state.nextModel = null;
           persistState();
           ctx.ui.notify("autoroute: on", "info");
