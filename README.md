@@ -421,6 +421,10 @@ npm test           # vitest run
 
 ## Changelog
 
+### 1.3.0
+
+- Allow configuring the extension without editing the json file
+
 ### 1.2.1
 
 - Notify when one or several of the configured models are unavailable
