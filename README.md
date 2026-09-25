@@ -389,12 +389,28 @@ the full breakdown `/autoroute explain` would show.
 | `/autoroute explain`                                                                        | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
 | `/autoroute log [n]`                                                                        | Replay the session's routing decisions as log lines                                 |
 | `/autoroute adaptive`                                                                       | The bandit's learned posteriors per request type and model                          |
-| `/autoroute next <model>`                                                          | Force a model for the next prompt only                                              |
-| `/autoroute pin <model>`                                                           | Freeze on one model until unpinned                                                  |
+| `/autoroute set [global\|project] <setting.path> <JSON value>`                             | Persist any router setting (project scope by default)                              |
+| `/autoroute tier <tier> <model> [thinking-level]`                                            | Set a tier's model and optional thinking level                                     |
+| `/autoroute next <model> [thinking-level]`                                                   | Force a model and optional thinking level for the next prompt only                 |
+| `/autoroute pin <model>`                                                                     | Freeze on one model until unpinned                                                  |
 | `/autoroute escalate`                                                                       | Re-run the last prompt one tier up                                                  |
 | `/autoroute off` / `on`                                                                     | Toggle routing for the session                                                      |
 | `--no-autoroute`                                                                            | CLI flag to start a session with routing disabled                                   |
 
+
+`set` accepts dotted config paths and JSON values, so it covers every `autorouter.json`
+setting without restarting Pi. For example:
+
+```text
+/autoroute tier REASONING anthropic/claude-opus-5 high
+/autoroute next anthropic/claude-sonnet-5 medium
+/autoroute set tierBoundaries.medium 0.35
+/autoroute set questionReply.enabled false
+/autoroute set keywordTierRules [{"keywords":["migration"],"tier":"REASONING"}]
+```
+
+`set` writes `.pi/autorouter.json` by default; prefix it with `global` to write
+`~/.pi/agent/autorouter.json`. Each save validates the entire configuration and takes effect immediately.
 
 ## Disabling the extension
 

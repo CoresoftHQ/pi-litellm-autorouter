@@ -64,9 +64,10 @@ export interface RouteInput {
   /** Set when this turn only answers a question the assistant asked. Detection lives in
    *  `question-reply.ts`; the router just honours it. */
   questionReply?: QuestionReplySignal | null;
-  /** A model the user forced for this one prompt via `/autoroute next`. Outranks
-   *  everything, including the plan-mode floor and a session pin. */
-  oneShot?: string | null;
+  /** A model and optional thinking level forced for this one prompt via
+   *  `/autoroute next`. Outranks everything, including the plan-mode floor and a
+   *  session pin. */
+  oneShot?: TierTarget | string | null;
   /** Injected for testability; defaults to `Date.now`. */
   now?: () => number;
   callerSystemPrompt?: string;
@@ -222,12 +223,13 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     consumedOneShot = true;
     decision.cause = "one_shot_override";
     decision.signals = ["one_shot_override"];
-    const result = await finish(null, null, [{ model: input.oneShot }]);
+    const target = typeof input.oneShot === "string" ? { model: input.oneShot } : input.oneShot;
+    const result = await finish(null, null, [target]);
     if (result.decision.chosenModel) return result;
     // Could not be applied. Rather than leave the turn on whatever model happened to be
     // active, fall through to ordinary routing — the decision record keeps the reason.
     decision.cause = "default_fallback";
-    decision.fellBackBecause = `one-shot override "${input.oneShot}" could not be applied${
+    decision.fellBackBecause = `one-shot override "${target.model}" could not be applied${
       result.decision.fellBackBecause ? `: ${result.decision.fellBackBecause}` : ""
     }`;
   }
