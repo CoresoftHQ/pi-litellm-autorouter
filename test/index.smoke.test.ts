@@ -474,6 +474,50 @@ describe("extension wiring", () => {
     expect(decisions[1]?.cause).toBe("heuristic_scorer");
   });
 
+  it("applies the thinking level supplied with a one-shot override", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("next anthropic/opus max", ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+    expect(m.thinkingCalls).toEqual(["max"]);
+    const decision = m.entries.find((e) => e.type === DECISION_ENTRY_TYPE)?.data as RouteDecision;
+    expect(decision.thinkingLevel).toBe("max");
+  });
+
+  it("updates a tier and its thinking level from the slash command", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("tier SIMPLE anthropic/opus high", ctx);
+    await m.fire("input", { text: "hi", source: "interactive" }, ctx);
+
+    expect(m.setModelCalls).toEqual(["anthropic/opus"]);
+    expect(m.thinkingCalls).toEqual(["high"]);
+    const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
+    expect(written.tiers.SIMPLE).toEqual([{ model: "anthropic/opus", thinkingLevel: "high" }]);
+  });
+
+  it("updates arbitrary settings with the generic slash command", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const ctx = mockCtx(dir);
+
+    await m.fire("session_start", { reason: "startup" }, ctx);
+    await m.commands.get("autoroute")!.handler("set decisionLog false", ctx);
+
+    const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
+    expect(written.decisionLog).toBe(false);
+    await m.commands.get("autoroute")!.handler("", ctx);
+    expect(ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("status:"), "info");
+  });
+
   it("rejects an unknown model at command time rather than at the next prompt", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
