@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildConfig } from "../src/config.ts";
+import { JevClassifier } from "../src/classify/jev.ts";
 import { route } from "../src/router.ts";
 import { decisionLogLine } from "../src/decision.ts";
 import type { ExtractedTurn } from "../src/types.ts";
@@ -488,6 +489,45 @@ describe("route — llm classifier", () => {
     });
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.signals.some((s) => s.includes("timed out"))).toBe(true);
+  });
+});
+
+describe("route — JEV classifier", () => {
+  const jevConfig = (extra: Record<string, unknown> = {}) =>
+    config({ classifierType: "jev", jevClassifierConfig: { apiKeyEnv: "TEST_TYPESAFE_KEY" }, ...extra });
+
+  it("uses the typed tier choice returned by TypeSafe System One", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const jev = new JevClassifier(async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ answers: { tier: { choice: "COMPLEX" } } }) };
+    });
+    const previous = process.env.TEST_TYPESAFE_KEY;
+    process.env.TEST_TYPESAFE_KEY = "test-key";
+    try {
+      const { decision } = await route({ turn: turn("anything"), config: jevConfig(), api: applier(), jev, now });
+      expect(decision.cause).toBe("jev_classifier");
+      expect(decision.tier).toBe("COMPLEX");
+      expect(calls[0]?.url).toBe("https://api.typesafe.ai/v1/systemone");
+      expect(JSON.parse(calls[0]?.init.body as string)).toMatchObject({ model: "jev-latest", questions: { tier: { type: "choice" } } });
+    } finally {
+      if (previous === undefined) delete process.env.TEST_TYPESAFE_KEY;
+      else process.env.TEST_TYPESAFE_KEY = previous;
+    }
+  });
+
+  it("falls back to the heuristic scorer when JEV returns no valid choice", async () => {
+    const jev = new JevClassifier(async () => ({ ok: true, status: 200, json: async () => ({ answers: {} }) }));
+    const previous = process.env.TEST_TYPESAFE_KEY;
+    process.env.TEST_TYPESAFE_KEY = "test-key";
+    try {
+      const { decision } = await route({ turn: turn("hi"), config: jevConfig(), api: applier(), jev, now });
+      expect(decision.cause).toBe("heuristic_scorer");
+      expect(decision.signals.some((signal) => signal.includes("jev_fallback"))).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.TEST_TYPESAFE_KEY;
+      else process.env.TEST_TYPESAFE_KEY = previous;
+    }
   });
 });
 

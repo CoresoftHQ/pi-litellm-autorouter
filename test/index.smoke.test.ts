@@ -144,21 +144,26 @@ describe("extension wiring", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
     home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
-    // loadConfig defaults to os.homedir(); point it at an empty dir so a developer's own
-    // global config cannot influence the test.
+    // `os.homedir()` uses HOME on Unix and USERPROFILE on Windows. Set both so a
+    // developer's global config or adaptive store cannot influence this suite.
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -677,6 +682,7 @@ describe("adaptive wiring", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   const ADAPTIVE_CONFIG = {
     ...CONFIG,
@@ -690,12 +696,16 @@ describe("adaptive wiring", () => {
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(ADAPTIVE_CONFIG));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -776,6 +786,7 @@ describe("semantic keyword matching wiring", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
   let originalFetch: typeof fetch;
 
   const SEMANTIC_CONFIG = {
@@ -792,7 +803,9 @@ describe("semantic keyword matching wiring", () => {
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(SEMANTIC_CONFIG));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     process.env.TEST_EMBED_KEY = "k";
     originalFetch = globalThis.fetch;
   });
@@ -800,6 +813,8 @@ describe("semantic keyword matching wiring", () => {
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     delete process.env.TEST_EMBED_KEY;
     globalThis.fetch = originalFetch;
     rmSync(dir, { recursive: true, force: true });
@@ -856,6 +871,7 @@ describe("decision log", () => {
   let dir: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
@@ -863,12 +879,16 @@ describe("decision log", () => {
     mkdirSync(join(dir, ".pi"), { recursive: true });
     writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify(CONFIG));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });

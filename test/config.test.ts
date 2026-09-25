@@ -124,6 +124,28 @@ describe("buildConfig", () => {
     expect(errors.join()).toContain("classifierLLMConfig is missing");
   });
 
+  it("parses JEV classifier settings with LiteLLM-compatible defaults", () => {
+    const { config, errors } = buildConfig([{ ...base, classifierType: "jev", jevClassifierConfig: {} }]);
+    expect(errors).toEqual([]);
+    expect(config.jevClassifierConfig).toEqual({
+      model: "jev-latest",
+      apiKeyEnv: "TYPESAFE_API_KEY",
+      timeoutMs: 3000,
+      circuitBreakerEnabled: true,
+      circuitBreakerCooldownSeconds: 30,
+    });
+  });
+
+  it("requires JEV configuration and rejects malformed JEV settings", () => {
+    expect(buildConfig([{ ...base, classifierType: "jev" }]).errors).toContain(
+      'classifierType is "jev" but jevClassifierConfig is missing',
+    );
+    expect(buildConfig([{ ...base, jevClassifierConfig: { instructions: "", timeoutMs: 0 } }]).errors).toEqual([
+      "jevClassifierConfig.instructions must be non-empty when set",
+      "jevClassifierConfig.timeoutMs must be a positive number",
+    ]);
+  });
+
   it("replaces the built-in reminder markers rather than extending them", () => {
     const { config } = buildConfig([{ ...base, reminderMarkers: [{ open: "<a>", close: "</a>" }] }]);
     expect(config.reminderMarkers).toEqual([{ open: "<a>", close: "</a>" }]);
@@ -339,7 +361,7 @@ describe("example configs", () => {
   const load = (name: string) =>
     buildConfig([JSON.parse(readFileSync(new URL(`../examples/autorouter.${name}.json`, import.meta.url), "utf8"))]);
 
-  it.each(["heuristic", "llm"])("examples/autorouter.%s.json loads without errors", (name) => {
+  it.each(["heuristic", "llm", "jev"])("examples/autorouter.%s.json loads without errors", (name) => {
     const { config, errors, warnings } = load(name);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);

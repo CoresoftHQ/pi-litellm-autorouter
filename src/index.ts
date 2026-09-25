@@ -19,6 +19,7 @@ import { classifyRequestType } from "./adaptive/request-type.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { defaultAdaptiveStorePath, readPersistedCells, writePersistedCells } from "./adaptive/store.ts";
 import { classifyHeuristic } from "./classify/heuristic.ts";
+import { JevClassifier } from "./classify/jev.ts";
 import { splitModelRef } from "./classify/llm.ts";
 import { type SemanticMatcher, buildSemanticMatcher } from "./classify/semantic.ts";
 import {
@@ -140,6 +141,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   let adaptive: AdaptiveRouter | null = null;
   const adaptiveStorePath = defaultAdaptiveStorePath();
   let semantic: SemanticMatcher | null = null;
+  /** Its timeout circuit breaker belongs to this extension/router instance. */
+  let jev: JevClassifier | null = null;
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
@@ -234,6 +237,10 @@ export default function autorouter(pi: ExtensionAPI): void {
     semantic = config ? buildSemanticMatcher(config, { registry: ctx.modelRegistry }) : null;
   };
 
+  const rebuildJev = (): void => {
+    jev = config?.classifierType === "jev" ? new JevClassifier() : null;
+  };
+
   const reloadConfig = (ctx: ExtensionContext): void => {
     const loaded = loadConfig(ctx.cwd);
     config = loaded.config;
@@ -242,6 +249,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configSources = loaded.sources;
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
+    rebuildJev();
   };
 
   /** Persist one complete effective config layer and activate it immediately. */
@@ -276,6 +284,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     restoreState(ctx);
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
+    rebuildJev();
     try {
       availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
     } catch {
@@ -370,6 +379,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
         },
         registry: ctx.modelRegistry as never,
+        jev: jev ?? undefined,
         planModeActive,
         pin,
         oneShot,
@@ -510,6 +520,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configSources = loaded.sources;
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
+    rebuildJev();
 
     ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
   };
@@ -720,7 +731,9 @@ export default function autorouter(pi: ExtensionAPI): void {
               `classifier: ${config.classifierType}${
                 config.classifierLLMConfig
                   ? ` (${config.classifierLLMConfig.model}, ${config.classifierLLMConfig.classificationRubric})`
-                  : ""
+                  : config.jevClassifierConfig
+                    ? ` (typesafe/${config.jevClassifierConfig.model})`
+                    : ""
               }`,
             );
             if (config.adaptive) {
