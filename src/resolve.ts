@@ -1,9 +1,10 @@
 /**
  * Turning a tier into a model pi will actually run.
  *
- * The safety rail of the whole extension: a candidate that is not in pi's registry, or
- * that pi has no credentials for, is demoted rather than fatal. Routing never fails a
- * prompt — the worst case is that the session keeps the model it already had.
+ * The safety rail of the whole extension: a candidate that is not in pi's registry, that
+ * pi has no credentials for, or that is itself a virtual model is demoted rather than
+ * fatal. Resolution is pure — it never selects anything — so the virtual model's router
+ * can walk the whole chain before it commits to a model for the request.
  */
 
 import type { RouterConfig } from "./config.ts";
@@ -17,20 +18,60 @@ import {
   tierSeverity,
 } from "./types.ts";
 
-/** The slice of pi's API this module needs. Narrow on purpose: it is the whole surface the
- *  extension depends on for applying a decision, so it is easy to fake in tests. */
-export interface ModelApplier {
-  find(provider: string, modelId: string): unknown;
-  /** Returns false when no API key is available for the model. */
-  setModel(model: never): Promise<boolean>;
-  setThinkingLevel?(level: ThinkingLevel): void;
+/** API id pi gives virtual catalog entries. Requests for it fail unless routed first. */
+export const VIRTUAL_MODEL_API = "pi-virtual";
+
+/** Whether `model` is a virtual catalog entry. A virtual model cannot route to another one,
+ *  so such an entry is never a usable candidate — this extension's own included. */
+export function isVirtualModel(model: unknown): boolean {
+  return Boolean(model && typeof model === "object" && (model as { api?: unknown }).api === VIRTUAL_MODEL_API);
 }
 
-export interface Applied {
+/** The slice of pi's model registry this module needs. Narrow on purpose: pi's own
+ *  `ModelRegistry` satisfies it as-is, and it is trivial to fake in tests. */
+export interface ModelLookup {
+  find(provider: string, modelId: string): unknown;
+  /** False when pi has no credentials for the model's provider. When omitted, every model
+   *  the registry knows counts as usable. */
+  hasConfiguredAuth?(model: never): boolean;
+}
+
+export interface Resolved {
   model: ModelRef;
   thinkingLevel: ThinkingLevel | null;
-  /** Set when the first choice could not be applied. */
+  /** pi's model object for `model`, ready to hand back from the virtual model's router. */
+  target: unknown;
+  /** Set when the first choice could not be used. */
   fellBackBecause?: string;
+}
+
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * pi's model object for `ref`, or why there is none that can serve a request.
+ *
+ * Problems are phrased as `"<ref>" <reason>` so the decision log and the failure toast can
+ * name the model that was skipped.
+ */
+export function resolveModelRef(ref: ModelRef, lookup: ModelLookup): { target: unknown } | { problem: string } {
+  const split = splitModelRef(ref);
+  if (!split) return { problem: `"${ref}" is not provider/model-id` };
+  let model: unknown;
+  let authed = true;
+  try {
+    model = lookup.find(split.provider, split.modelId);
+    if (model && !isVirtualModel(model) && lookup.hasConfiguredAuth) {
+      authed = lookup.hasConfiguredAuth(model as never);
+    }
+  } catch (err) {
+    return { problem: `"${ref}" failed to resolve: ${describeError(err)}` };
+  }
+  if (!model) return { problem: `"${ref}" is not in pi's model registry` };
+  if (isVirtualModel(model)) return { problem: `"${ref}" is a virtual model` };
+  // No credentials is not an error, it just means this candidate is not available to this
+  // user right now.
+  if (!authed) return { problem: `"${ref}" has no available credentials` };
+  return { target: model };
 }
 
 /** `defaultModel` as a candidate, thinking level included; null when none is set. */
@@ -98,59 +139,32 @@ export function candidatesForTier(tier: Tier, config: RouterConfig, rng: Rng = M
 }
 
 /**
- * Apply the first usable candidate.
+ * Resolve the first usable candidate, best first.
  *
- * `setThinkingLevel` is called *after* `setModel`, never before: pi clamps the level to
- * the model's capabilities, so setting it against the outgoing model would clamp against
- * the wrong ceiling.
+ * Nothing is selected here: the caller hands the result back from the virtual model's
+ * router, and pi clamps the thinking level to the model the request is routed to.
  */
-export async function applyFirstUsable(
+export function resolveFirstUsable(
   candidates: readonly TierTarget[],
-  api: ModelApplier,
-): Promise<{ applied: Applied | null; problems: string[] }> {
+  lookup: ModelLookup,
+): { resolved: Resolved | null; problems: string[] } {
   const problems: string[] = [];
 
   for (const candidate of candidates) {
-    const ref = splitModelRef(candidate.model);
-    if (!ref) {
-      problems.push(`"${candidate.model}" is not provider/model-id`);
+    const result = resolveModelRef(candidate.model, lookup);
+    if ("problem" in result) {
+      problems.push(result.problem);
       continue;
     }
-    const model = api.find(ref.provider, ref.modelId);
-    if (!model) {
-      problems.push(`"${candidate.model}" is not in pi's model registry`);
-      continue;
-    }
-    let ok = false;
-    try {
-      ok = await api.setModel(model as never);
-    } catch (err) {
-      problems.push(`"${candidate.model}" failed to apply: ${err instanceof Error ? err.message : String(err)}`);
-      continue;
-    }
-    if (!ok) {
-      // pi returns false when there is no API key for the model. That is not an error, it
-      // just means this candidate is not available to this user right now.
-      problems.push(`"${candidate.model}" has no available credentials`);
-      continue;
-    }
-
-    if (candidate.thinkingLevel && api.setThinkingLevel) {
-      try {
-        api.setThinkingLevel(candidate.thinkingLevel);
-      } catch {
-        // A thinking level that the model cannot honour is not worth losing the model over.
-      }
-    }
-
-    const applied: Applied = {
+    const resolved: Resolved = {
       model: candidate.model,
       thinkingLevel: candidate.thinkingLevel ?? null,
+      target: result.target,
     };
     // Problems accumulated before the winner are the reason this was not the first choice.
-    if (problems.length > 0) applied.fellBackBecause = problems.join("; ");
-    return { applied, problems };
+    if (problems.length > 0) resolved.fellBackBecause = problems.join("; ");
+    return { resolved, problems };
   }
 
-  return { applied: null, problems };
+  return { resolved: null, problems };
 }

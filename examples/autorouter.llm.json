@@ -1,11 +1,11 @@
 {
   "defaultModel": {
-    "model": "anthropic/claude-haiku-4-5",
-    "thinkingLevel": "low"
+    "model": "anthropic/claude-haiku-5-5",
+    "thinkingLevel": "medium"
   },
   "classifierType": "llm",
   "classifierLLMConfig": {
-    "model": "anthropic/claude-haiku-4-5",
+    "model": "anthropic/claude-haiku-5-5",
     "classificationRubric": "agentic",
     "timeoutMs": 3000
   },
@@ -14,11 +14,11 @@
   "classifierContextPerTurnChars": 200,
   "classifierContextIncludeAssistantTurns": false,
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
     "REASONING": {
-      "model": "anthropic/claude-opus-5",
+      "model": "anthropic/claude-opus-5-5",
       "thinkingLevel": "high"
     }
   }

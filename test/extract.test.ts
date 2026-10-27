@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_REMINDER_MARKERS } from "../src/defaults.ts";
-import { extractTurn, newestTurnAsk, stripReminderBlocks } from "../src/extract.ts";
+import {
+  SKILL_BLOCK_MARKERS,
+  extractTurn,
+  newestTurnAsk,
+  splitCurrentTurn,
+  stripReminderBlocks,
+  withSkillBlocks,
+} from "../src/extract.ts";
 
 const MARKERS = DEFAULT_REMINDER_MARKERS;
 
@@ -127,6 +134,59 @@ describe("extractTurn", () => {
     ).toEqual(["user", "assistant"]);
   });
 
+  it("quotes only the latest assistant text reply, without taking a window slot", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: [{ type: "text", text: "earlier narration" }] },
+      { role: "user", content: "u3" },
+      { role: "assistant", content: [{ type: "text", text: "let me check the config" }] },
+      { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
+      { role: "assistant", content: [{ type: "text", text: "Want me to also refactor the auth module?" }] },
+    ];
+    const turn = extractTurn("yes", messages, { ...options, includeAssistantTurns: true });
+    // All three user asks fit; the narration does not crowd them out.
+    expect(turn.priorTurns).toEqual([
+      { role: "user", text: "u1" },
+      { role: "user", text: "u2" },
+      { role: "user", text: "u3" },
+      { role: "assistant", text: "Want me to also refactor the auth module?" },
+    ]);
+  });
+
+  it("skips assistant messages that only call tools when looking for the latest reply", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: [{ type: "text", text: "Should I run the migrations?" }] },
+      { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: {} }] },
+    ];
+    const turn = extractTurn("go ahead", messages, { ...options, includeAssistantTurns: true });
+    expect(turn.priorTurns.map((t) => t.text)).toEqual(["u1", "Should I run the migrations?"]);
+  });
+
+  it("puts the assistant reply in its place in the conversation", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: [{ type: "text", text: "done, anything else?" }] },
+      { role: "user", content: "u2" },
+    ];
+    const turn = extractTurn("x", messages, { ...options, includeAssistantTurns: true });
+    expect(turn.priorTurns.map((t) => t.role)).toEqual(["user", "assistant", "user"]);
+  });
+
+  it("truncates the assistant reply like any quoted turn", () => {
+    const messages = [{ role: "assistant", content: [{ type: "text", text: "y".repeat(50) }] }];
+    const turn = extractTurn("x", messages, { ...options, includeAssistantTurns: true, perTurnChars: 5 });
+    expect(turn.priorTurns).toEqual([{ role: "assistant", text: "yyyyy…" }]);
+  });
+
+  it("quotes no assistant reply when the window is 0", () => {
+    const messages = [{ role: "assistant", content: [{ type: "text", text: "proceed?" }] }];
+    expect(
+      extractTurn("yes", messages, { ...options, includeAssistantTurns: true, contextWindowSize: 0 }).priorTurns,
+    ).toEqual([]);
+  });
+
   it("drops a prior turn that repeats the current ask", () => {
     const messages = [
       { role: "user", content: "real question" },
@@ -154,5 +214,45 @@ describe("extractTurn", () => {
   it("sends no context at all when the window is 0", () => {
     const messages = [{ role: "user", content: "one" }];
     expect(extractTurn("two", messages, { ...options, contextWindowSize: 0 }).priorTurns).toHaveLength(0);
+  });
+});
+
+describe("splitCurrentTurn", () => {
+  it("takes the user messages after the newest assistant message as the current ask", () => {
+    const messages = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+    ];
+    const { current, prior } = splitCurrentTurn(messages);
+    expect(current).toBe("second");
+    expect(prior).toEqual(messages.slice(0, 2));
+  });
+
+  it("joins several trailing user messages", () => {
+    const { current, prior } = splitCurrentTurn([
+      { role: "user", content: "one" },
+      { role: "user", content: "two" },
+    ]);
+    expect(current).toBe("one\ntwo");
+    expect(prior).toEqual([]);
+  });
+
+  it("has no current ask when the assistant spoke last", () => {
+    expect(splitCurrentTurn([{ role: "assistant", content: "hi" }]).current).toBe("");
+  });
+});
+
+describe("withSkillBlocks", () => {
+  const skill = '<skill name="review" location="/s/SKILL.md">\nthink step by step\n</skill>\n\nfix the typo';
+
+  it("strips pi's expanded skill, leaving the user's arguments", () => {
+    expect(stripReminderBlocks(skill, withSkillBlocks(MARKERS))).toBe("fix the typo");
+  });
+
+  it("keeps the configured markers and does not add the skill pair twice", () => {
+    const pairs = withSkillBlocks(MARKERS);
+    expect(pairs).toEqual([...MARKERS, SKILL_BLOCK_MARKERS]);
+    expect(withSkillBlocks(pairs)).toEqual(pairs);
   });
 });

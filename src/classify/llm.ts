@@ -85,6 +85,7 @@ export async function classifyWithLLM(
   config: RouterConfig,
   registry: ClassifierRegistry,
   callerSystemPrompt?: string,
+  signal?: AbortSignal,
 ): Promise<ClassifierOutcome> {
   const llm = config.classifierLLMConfig;
   if (!llm) return { ok: false, reason: "no classifier model configured" };
@@ -95,6 +96,12 @@ export async function classifyWithLLM(
 
   const model = registry.find(ref.provider, ref.modelId);
   if (!model) return { ok: false, reason: `classifier model "${llm.model}" is not in pi's registry` };
+  // Completing against a virtual model routes it, and routing is what is being decided
+  // here: with the router's own model as its classifier, every request would recurse.
+  if ((model as { api?: unknown }).api === "pi-virtual") {
+    return { ok: false, reason: `classifier model "${llm.model}" is a virtual model` };
+  }
+  if (signal?.aborted) return { ok: false, reason: "request aborted" };
 
   const systemPrompt = classificationSystemPrompt({
     contextWindowSize: config.classifierContextWindowSize,
@@ -115,6 +122,9 @@ export async function classifyWithLLM(
   // a hard ceiling: the request is abandoned, not merely reported late.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), llm.timeoutMs);
+  // The user aborting the request abandons the classifier call with it.
+  const onAbort = (): void => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     const response = await registry.complete(
@@ -131,11 +141,14 @@ export async function classifyWithLLM(
       classification: { tier, signals: ["llm_classifier"], cause: "llm_classifier" },
     };
   } catch (err) {
-    const reason = controller.signal.aborted
-      ? `classifier timed out after ${llm.timeoutMs}ms`
-      : `classifier call failed: ${err instanceof Error ? err.message : String(err)}`;
+    const reason = signal?.aborted
+      ? "request aborted"
+      : controller.signal.aborted
+        ? `classifier timed out after ${llm.timeoutMs}ms`
+        : `classifier call failed: ${err instanceof Error ? err.message : String(err)}`;
     return { ok: false, reason };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }

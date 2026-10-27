@@ -7,29 +7,36 @@ in-process, no proxy required.
 
 pi normally uses one model for a whole session, switched by hand with `/model`. That's wasteful: a trivial
 question ("what does this env var do?") doesn't need the same model as a hard debugging session. This
-extension classifies every prompt before it runs and calls `pi.setModel()` to route it to the right tier -
-so cheap prompts go to cheap models and hard prompts go to strong ones, automatically.
+extension adds a [virtual model](https://pi.dev/docs/latest/virtual-models), **`autorouter/tiered`**. Select it
+like any other model, and every prompt is classified before it runs and routed to the right tier - so cheap
+prompts go to cheap models and hard prompts go to strong ones, automatically.
 
 It's a TypeScript port of [LiteLLM's Auto Router v2](https://docs.litellm.ai/docs/proxy/auto_routing)
-(`auto_router/complexity_router`), adapted to run inside pi's extension API instead of behind a separate
-LiteLLM proxy process. That means no extra network hop, and pi's UI/thinking-level/credential logic can see
-the model that was actually picked.
+(`auto_router/complexity_router`), adapted to run inside pi instead of behind a separate LiteLLM proxy
+process. That means no extra network hop, and pi itself knows which model answered: the footer shows the
+routed model next to the selection (`tiered • medium → claude-sonnet-5-5 • high`), each assistant message
+records it, and `/session` lists the cost per physical model.
 
 ## How it works
 
-Each user prompt goes through: **extract → classify → override → select → apply**.
+While `autorouter/tiered` is selected, pi asks the router for a physical model before every request. Each new
+prompt goes through: **extract → classify → override → select → route**.
 
-1. **Extract** - strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
- the current ask plus a few prior turns for context.
-2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Two classifiers are supported:
+1. **Extract** - strip `<system-reminder>` blocks and pi's expanded `/skill:` blocks (harness plumbing, not
+ something the user asked), pull out the current ask plus a few prior turns for context.
+2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Three classifiers are supported:
   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
    technical terms, length, etc.), no API call.
   - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
   default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
   lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
   to agent traffic.
-3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or
-   `--no-autoroute` escape hatch, a [question reply](#question-replies) (a turn that only answers a
+  - `decision` - a [decision model](#example-decision-model-classifier-jev-clef) such as TypeSafe's
+  Jev or Cloudflare's Clef answers one typed `tier` question with probabilities, instead of generating
+  text.
+3. **Override** - a few signals outrank the classifier, in order: a one-shot `/autorouter next`, an
+   `/autorouter pin` or `/autorouter off` / `--no-autorouter` escape hatch, a
+   [question reply](#question-replies) (a turn that only answers a
    question the assistant asked keeps the model it was asked with), a session-affinity pin (reuse the
    first turn's model for the whole session, if enabled), `keywordTierRules` (keyword → tier, literal or
    [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a configured tier
@@ -38,60 +45,95 @@ Each user prompt goes through: **extract → classify → override → select �
 4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or, with
    `adaptive: true`, a Thompson-sampled pick across the pools weighted by learned quality, price, and
    distance from the classified tier. See [Adaptive selection](#adaptive-selection).
-5. **Apply** - resolve the chosen model against pi's own model registry and credentials; call
-   `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials),
-   then `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer
-   status).
+5. **Route** - resolve the chosen model against pi's own model registry and credentials (falling back down
+   the chain, then to `defaultModel`, if a model has no credentials), hand it to pi with its thinking level,
+   and record the decision (visible via `/autorouter explain` and the footer status). The selection stays
+   `autorouter/tiered`; nothing calls `pi.setModel()`.
 
-Routing never fails a prompt: any classifier error or unresolved model falls back to `defaultModel`, and the
-model is chosen once per prompt and held for the whole agent turn (including all its tool calls) - it never
-switches mid-turn.
+The model is chosen once per prompt and held for the whole agent run - it never switches mid-run. Only the
+first request of a prompt is classified; everything else stays on the model already serving the
+conversation, which keeps prompt caches and thinking signatures valid:
+
+| Request | Routed to |
+| --- | --- |
+| A prompt you typed (or sent over RPC, or with `pi -p`) | Classified and routed |
+| Tool-call continuations within the run | The model serving the run |
+| Automatic retries, including after compaction for a context overflow | The model that failed |
+| Steering and follow-up messages queued while the run is in flight | The model serving the run |
+| Prompts other extensions send with `pi.sendUserMessage()` | The model serving the session |
+| Compaction summaries and other requests outside the agent loop | The model serving the session, else `defaultModel` |
+
+Routing rarely fails a prompt: a classifier error falls back per `classifierFallback`, an unusable model
+falls down the chain, and when nothing in the chain is usable the request stays on the model already
+serving the session. Only when there is no such model either does the request end with an error that
+names the models it tried.
+
+### Thinking levels
+
+`autorouter/tiered` offers every thinking level, from `off` to `max`. The level you select is the default for
+tier entries that don't set their own: with `autorouter/tiered • low`, a plain `"anthropic/claude-sonnet-5-5"`
+entry runs at `low`, while `{ "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }` always runs at
+`high`. pi clamps the result to what the routed model supports.
 
 ## Installation
 
+Requires pi 0.99 or later (virtual models).
+
 ```bash
 pi install npm:@coresofthq/pi-litellm-autorouter
-# then, inside pi:  /autoroute init
+# then, inside pi:  /autorouter init
 ```
 
-`/autoroute init` reads the models pi can reach, ranks them by price, and writes a starter config to
-`~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override). Edit the tiers from
-there - price is only a proxy for capability, not the same thing.
+`/autorouter init` reads the models pi can reach, ranks them by price, and writes a starter config to
+`~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override), then selects
+`autorouter/tiered` for the session. Edit the tiers from there - price is only a proxy for capability, not the
+same thing.
+
+To route every session, pick `autorouter/tiered` in `/model` (or start pi with `--model autorouter/tiered`), or
+make it the default in `~/.pi/agent/settings.json`:
+
+```json
+{ "defaultProvider": "autorouter", "defaultModel": "tiered" }
+```
+
+Selecting any other model takes the router out of the loop until you select `autorouter/tiered` again (or run
+`/autorouter on`). With `enabledModels` / `--models` scoping, add `autorouter/tiered` to the list.
 
 ### The minimum config
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": "anthropic/claude-haiku-5-5",
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   }
 }
 ```
 
-Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. `defaultModel` takes the same
+Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. They must be physical models:
+a virtual model, `autorouter/tiered` included, cannot be routed to and is skipped. `defaultModel` takes the same
 shape as a tier entry, so it can carry a thinking level too:
 
 ```json
-{ "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" } }
+{ "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" } }
 ```
 
 ### Example: heuristic classifier (default)
 
-Local, sub-millisecond, no API calls. Good starting point - this is what `/autoroute init` writes.
+Local, sub-millisecond, no API calls. Good starting point - this is what `/autorouter init` writes.
 Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.json).
 
 ```json
 {
-  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
+  "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   },
   "keywordTierRules": [
     { "keywords": ["migration", "schema change", "security review"], "tier": "REASONING" },
@@ -112,17 +154,17 @@ rubric described above; `classifierFallback: "heuristic"` means a timeout degrad
 scoring instead of stalling the turn. Generate this shape with the `llm` flag:
 
 ```
-/autoroute init llm
+/autorouter init llm
 ```
 
 Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 
 ```json
 {
-  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
+  "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
   "classifierType": "llm",
   "classifierLLMConfig": {
-    "model": "anthropic/claude-haiku-4-5",
+    "model": "anthropic/claude-haiku-5-5",
     "classificationRubric": "agentic",
     "timeoutMs": 3000
   },
@@ -131,23 +173,88 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
   "classifierContextPerTurnChars": 200,
   "classifierContextIncludeAssistantTurns": false,
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   }
 }
 ```
 
+The classifier sees your last `classifierContextWindowSize` prompts as context, each cut to
+`classifierContextPerTurnChars`, so a short follow-up like "yes, do it" is rated by the work it continues.
+`classifierContextIncludeAssistantTurns: true` adds the assistant's latest text reply - the proposal a "yes"
+answers - without taking one of those slots. It's off by default: answers to question tools are already held
+on the model that asked, and your earlier prompts usually say what is being approved. Turn it on if the
+assistant often proposes work in plain text. The same settings apply to the decision-model classifier.
+
+### Example: decision-model classifier (Jev, Clef)
+
+A decision model doesn't chat: it answers typed questions about a request, with a probability for each
+answer. With `classifierType: "decision"`, the router asks one System One `choice` question named `tier`
+(each tier's meaning as the criteria) and sends the same request payload the `llm` classifier gets
+(current ask, prior turns, conversation depth) as the state. The call goes through one of pi's own
+classifier models, straight to the service that hosts it, with the credentials pi already has.
+
+`model` names the classifier model as `provider/model-id`, like every other model in this config. Hosted
+Jev, with `TYPESAFE_API_KEY` set (full file: [`examples/autorouter.jev.json`](examples/autorouter.jev.json)):
+
+```json
+{
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "typesafe/jev-latest", "timeoutMs": 3000 },
+  "classifierFallback": "heuristic"
+}
+```
+
+Cloudflare's Clef on Workers AI, with `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` set (full file:
+[`examples/autorouter.clef.json`](examples/autorouter.clef.json)):
+
+```json
+{
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "cloudflare-workers-ai/@cf/cloudflare/clef", "timeoutMs": 15000 }
+}
+```
+
+Any classifier model pi supports works, including ones a pi update or `models.json` adds later:
+
+| Decision model | `model` |
+| --- | --- |
+| Jev, TypeSafe | `typesafe/jev-latest` |
+| Jev, OpenRouter / Workers AI / Vercel AI Gateway / OpenCode | `openrouter/typesafe/jev-1.14`, `cloudflare-workers-ai/typesafe/jev`, `vercel-ai-gateway/typesafe-ai/jev`, `opencode/jev-1.13` |
+| Clef, Workers AI | `cloudflare-workers-ai/@cf/cloudflare/clef`, `cloudflare-workers-ai/@cf/cloudflare/clef-flash`, `cloudflare-workers-ai/@cf/cloudflare/clef-omni` |
+| Clef, OpenRouter | `openrouter/cloudflare/clef`, `openrouter/cloudflare/clef-flash`, `openrouter/cloudflare/clef-omni` |
+| OpenAI's Decisions API | `openai/gpt-6-luna` (needs `OPENAI_API_KEY`, not a ChatGPT login) |
+
+pi lists more; see pi's [classifier models](https://pi.dev/docs/latest/models#use-classifier-models).
+
+| Key (`decisionClassifierConfig`) | Default | Purpose |
+| --- | --- | --- |
+| `model` | `typesafe/jev-latest` | The classifier model, `provider/model-id` |
+| `timeoutMs` | `3000` | A hard deadline: the call is abandoned and `classifierFallback` applies |
+| `instructions` | built in | Replaces the question's instructions; the tier criteria stay |
+| `circuitBreakerEnabled` | `true` | One timeout skips the classifier, straight to `classifierFallback`, for the cooldown |
+| `circuitBreakerCooldownSeconds` | `30` | After it, one prompt probes; success closes the circuit, failure restarts the cooldown |
+
+There are no endpoint or key settings: pi owns the connection, so set keys with `/login` or the
+provider's environment variable, and endpoints in `models.json`. Decisions are logged as
+`cause=decision_classifier`, with the choice, its confidence and every tier's probability under `signals`;
+`/autorouter explain` also names the model and the call's cost. A tier with no models counts as a
+classifier failure, so `classifierFallback` decides instead. A `decisionClassifierConfig` left in place
+under another `classifierType` is ignored with a warning.
+
 ### Example: mixing providers
 
 Tiers are independent, so each can name whichever provider does that job best - and the classifier can be a
-third. Here OpenAI covers the cheap tiers, Anthropic the hard ones, and a small Mistral model classifies.
+third. Here Anthropic covers the cheapest and the hardest tiers, OpenAI the everyday ones, and a small Mistral
+model classifies. Terra comes through a ChatGPT plan (`openai-codex/`, sign in with `/login`); with an OpenAI
+API key instead, write `openai/gpt-6.1-terra` once pi's `openai` catalog lists it.
 Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.json).
 
 ```json
 {
-  "defaultModel": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+  "defaultModel": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
   "classifierType": "llm",
   "classifierLLMConfig": {
     "model": "mistral/mistral-small-2603",
@@ -159,10 +266,10 @@ Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.js
   "classifierContextPerTurnChars": 200,
   "classifierContextIncludeAssistantTurns": false,
   "tiers": {
-    "SIMPLE": { "model": "openai/gpt-5.6-luna", "thinkingLevel": "low" },
-    "MEDIUM": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
-    "COMPLEX": { "model": "anthropic/claude-sonnet-5", "thinkingLevel": "high" },
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
+    "MEDIUM": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "xhigh" }
   }
 }
 ```
@@ -170,10 +277,38 @@ Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.js
 Every model named must be one pi can reach with its own credentials; a tier whose provider has no key falls
 down the chain to the next usable candidate, and the decision log says so under `fallback=`.
 
-Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
-can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
+### Example: recommended
 
-- e.g. `/autoroute init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
+The same tiers as the mixed-provider example, with TypeSafe's Jev deciding the tier: one structured
+[decision-model](#example-decision-model-classifier-jev-clef) call per prompt instead of a chat completion,
+and a timeout or error still falls back to the local scorer. It also shows Jev the assistant's latest reply
+(`classifierContextIncludeAssistantTurns`), so a "yes" to a proposal is rated by the proposed work.
+
+Needs `TYPESAFE_API_KEY`, your Anthropic credentials and a ChatGPT sign-in for Terra. Full file:
+[`examples/autorouter.recommended.json`](examples/autorouter.recommended.json).
+
+```json
+{
+  "defaultModel": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "typesafe/jev-latest", "timeoutMs": 3000 },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": true,
+  "tiers": {
+    "SIMPLE": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
+    "MEDIUM": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "xhigh" }
+  }
+}
+```
+
+Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
+can tolerate the extra latency. `/autorouter init [provider] [project] [llm]` accepts all three flags together
+
+- e.g. `/autorouter init anthropic project llm` scopes to one provider, writes to `.pi/autorouter.json`, and
 configures the LLM classifier in one go. There's no separate command to flip classifier mode afterwards;
 re-run `init`, or edit `classifierType` (and `classifierLLMConfig`) directly in the config file.
 
@@ -209,13 +344,14 @@ own, `ok` is `SIMPLE` - so the session drops to Haiku, and Haiku is the model th
 answer. The turn carries no information about the work, so the honest thing is not to score it at all:
 
 ```
-autoroute: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=anthropic/claude-sonnet-5
-autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
+autorouter: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=anthropic/claude-sonnet-5-5
+autorouter: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
 ```
 
-`routed_model=(unchanged)` is literal: on this path no candidate is resolved and `pi.setModel()` is never
-called, so it is the one decision that cannot move the model even by falling back. The footer reads
-`autoroute: held (question reply)`.
+`routed_model=(unchanged)` is literal: on this path no candidate is resolved and the request goes to the
+model that asked the question, so it is the one decision that cannot move the model even by falling back.
+The footer reads `autorouter: held (question reply)`. The tier it holds at is kept as router state on the
+session branch, so it survives a resume, a fork, and compaction.
 
 A turn has to pass **both** tests to be held:
 
@@ -303,10 +439,10 @@ its cold-start phase (unobserved models in the classified tier are tried uniform
   "tierDistancePenalty": 0.5,
   "adaptiveEligible": "all",
   "tiers": {
-    "SIMPLE": [{ "model": "anthropic/claude-haiku-4-5", "qualityTier": 1, "strengths": ["factual_lookup"] }],
-    "MEDIUM": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
-    "COMPLEX": [{ "model": "anthropic/claude-sonnet-5", "qualityTier": 2, "strengths": ["code_generation"] }],
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high", "qualityTier": 3 }
+    "SIMPLE": [{ "model": "anthropic/claude-haiku-5-5", "qualityTier": 1, "strengths": ["factual_lookup"] }],
+    "MEDIUM": ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5"],
+    "COMPLEX": [{ "model": "anthropic/claude-sonnet-5-5", "qualityTier": 2, "strengths": ["code_generation"] }],
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high", "qualityTier": 3 }
   }
 }
 ```
@@ -325,7 +461,7 @@ event: a rephrase or a "forget it" in the next prompt counts against the model t
 reply; a tool-call loop, a near-duplicate reply, or an errored tool result counts against the model that
 produced this one; a "thanks" (after the third turn) counts for it. Posteriors persist in
 `~/.pi/agent/autorouter-adaptive.json`; rows for models no longer in any pool are dropped on load. Inspect
-them with `/autoroute adaptive`, and see how the last pick was scored with `/autoroute explain`.
+them with `/autorouter adaptive`, and see how the last pick was scored with `/autorouter explain`.
 
 ### Decision log
 
@@ -334,54 +470,55 @@ On by default. Every routing decision prints one line in the shape of upstream's
 against pi's console and a LiteLLM proxy log:
 
 ```
-autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-4-5
-autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5, thinking=high, keyword="migration"
-autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
-autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
-autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
-autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
-autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low
+autorouter: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-5-5
+autorouter: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5-5, thinking=high, keyword="migration"
+autorouter: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5-5, thinking=high
+autorouter: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5-5
+autorouter: routing decision cause=decision_classifier, tier=COMPLEX, signals=[typesafe-classifier:COMPLEX, typesafe-confidence=0.812000, tier-probability:SIMPLE=0.021000, tier-probability:MEDIUM=0.142000, tier-probability:COMPLEX=0.812000, tier-probability:REASONING=0.025000], routed_model=anthropic/claude-sonnet-5-5
+autorouter: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5-5
+autorouter: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
+autorouter: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-5-5, thinking=medium
 ```
 
 pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallback`, the adaptive phase under
 `signals`) appear only when set, after upstream's fields.
 
-- **Interactive mode**: the line is drawn dimly in the chat, just above the prompt it routed. It is a rendering
+- **Interactive mode**: the line is drawn dimly in the chat, just below the prompt it routed. It is a rendering
 of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
 model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
-the full breakdown `/autoroute explain` would show.
+the full breakdown `/autorouter explain` would show.
 - `**pi -p` / RPC**: the line goes to **stderr**, keeping stdout clean for the agent's output.
-- `/autoroute log [n]` replays the session's decisions (or the last `n`) on demand.
-- `"decisionLog": false` silences both; decisions are still recorded and `/autoroute log` still works.
+- `/autorouter log [n]` replays the session's decisions (or the last `n`) on demand.
+- `"decisionLog": false` silences both; decisions are still recorded and `/autorouter log` still works.
 
 ## Useful commands
 
 
 | Command                                                                                     | Purpose                                                                             |
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `/autoroute`                                                                                | Show current classifier, last decision, tier, and score                             |
-| `/autoroute init [provider] [project] [llm]`                                                | Generate a config from the models pi can reach                                      |
-| `/autoroute explain`                                                                        | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
-| `/autoroute log [n]`                                                                        | Replay the session's routing decisions as log lines                                 |
-| `/autoroute adaptive`                                                                       | The bandit's learned posteriors per request type and model                          |
-| `/autoroute set [global\|project] <setting.path> <JSON value>`                             | Persist any router setting (project scope by default)                              |
-| `/autoroute tier <tier> <model> [thinking-level]`                                            | Set a tier's model and optional thinking level                                     |
-| `/autoroute next <model> [thinking-level]`                                                   | Force a model and optional thinking level for the next prompt only                 |
-| `/autoroute pin <model>`                                                                     | Freeze on one model until unpinned                                                  |
-| `/autoroute escalate`                                                                       | Re-run the last prompt one tier up                                                  |
-| `/autoroute off` / `on`                                                                     | Toggle routing for the session                                                      |
-| `--no-autoroute`                                                                            | CLI flag to start a session with routing disabled                                   |
+| `/autorouter`                                                                               | Show current classifier, last decision, tier, and score                             |
+| `/autorouter init [provider] [project] [llm]`                                               | Generate a config from the models pi can reach                                      |
+| `/autorouter explain`                                                                       | Per-dimension breakdown of why a prompt got its tier (and how the bandit scored it) |
+| `/autorouter log [n]`                                                                       | Replay the session's routing decisions as log lines                                 |
+| `/autorouter adaptive`                                                                      | The bandit's learned posteriors per request type and model                          |
+| `/autorouter set [global\|project] <setting.path> <JSON value>`                            | Persist any router setting (project scope by default)                              |
+| `/autorouter tier <tier> <model> [thinking-level]`                                           | Set a tier's model and optional thinking level                                     |
+| `/autorouter next <model> [thinking-level]`                                                  | Force a model and optional thinking level for the next prompt only                 |
+| `/autorouter pin [model]`                                                                    | Route every prompt to one model (default: the one serving the session) until `unpin` |
+| `/autorouter off`                                                                           | Pause routing for the session: `autorouter/tiered` keeps the model it is on            |
+| `/autorouter on`                                                                            | Resume routing (clears `off`, `pin`, and `next`) and select `autorouter/tiered`        |
+| `--no-autorouter`                                                                           | CLI flag to start a session with routing paused                                     |
 
 
 `set` accepts dotted config paths and JSON values, so it covers every `autorouter.json`
 setting without restarting Pi. For example:
 
 ```text
-/autoroute tier REASONING anthropic/claude-opus-5 high
-/autoroute next anthropic/claude-sonnet-5 medium
-/autoroute set tierBoundaries.medium 0.35
-/autoroute set questionReply.enabled false
-/autoroute set keywordTierRules [{"keywords":["migration"],"tier":"REASONING"}]
+/autorouter tier REASONING anthropic/claude-opus-5-5 high
+/autorouter next anthropic/claude-sonnet-5-5 medium
+/autorouter set tierBoundaries.medium 0.35
+/autorouter set questionReply.enabled false
+/autorouter set keywordTierRules [{"keywords":["migration"],"tier":"REASONING"}]
 ```
 
 `set` writes `.pi/autorouter.json` by default; prefix it with `global` to write
@@ -389,9 +526,10 @@ setting without restarting Pi. For example:
 
 ## Disabling the extension
 
-`/autoroute off` only pauses routing for the current session, and `--no-autoroute` only for one launch. To
-stop the extension from loading at all - for instance because you'd rather let an external LiteLLM proxy
-do the routing - use pi's own mechanisms:
+Routing only happens while `autorouter/tiered` is selected, so picking another model in `/model` is enough to
+stop it. `/autorouter off` pauses routing for the current session without leaving `autorouter/tiered`, and
+`--no-autorouter` does the same for one launch. To stop the extension from loading at all - for instance
+because you'd rather let an external LiteLLM proxy do the routing - use pi's own mechanisms:
 
 - **Toggle it interactively**: run `pi config`, find the extension, and disable it. Tab switches between global
 (`~/.pi/agent/settings.json`) and project-local (`.pi/settings.json`) scope; `pi config -l` starts in the
@@ -420,6 +558,23 @@ npm test           # vitest run
 ```
 
 ## Changelog
+
+### 2.0.0
+
+- **Breaking:** routing is now a pi virtual model, `autorouter/tiered`. Select it in `/model`, start pi with
+  `--model autorouter/tiered`, or make it the default model to route; any other model bypasses the router.
+  Requires pi 0.99 or later.
+- **Breaking:** the slash command is now `/autorouter` (was `/autoroute`), the flag `--no-autorouter`, and
+  log lines and notices start with `autorouter:`. Sessions from 1.x keep their pins, overrides and decision
+  log, and plan-mode extensions can keep emitting `autoroute:plan-mode` (now `autorouter:plan-mode`)
+- Tool-call continuations, retries, steers and compaction summaries stay on the model serving the turn;
+  the thinking level selected on `autorouter/tiered` is the default for tiers without their own
+- Add the decision-model classifier (`classifierType: "decision"`) for Jev, Clef and any other classifier
+  model pi supports
+- `classifierContextIncludeAssistantTurns` now quotes only the assistant's latest text reply, and it no longer
+  takes a context-window slot from your own prompts
+- Example configs use the latest models, and a new `examples/autorouter.recommended.json` pairs the
+  mixed-provider tiers with the Jev classifier
 
 ### 1.3.0
 

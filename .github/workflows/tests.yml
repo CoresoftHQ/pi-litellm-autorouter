@@ -2,10 +2,15 @@ name: Tests
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
+# A newer push to a pull request supersedes the run for the previous one. Every other run gets
+# a group of its own: GitHub cancels a pending run whenever a newer one queues in the same
+# group, so sharing one would let a quick second push to main skip the first one's tests.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:

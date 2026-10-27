@@ -185,7 +185,7 @@ export function buildInitialConfig(models: readonly CandidateModel[], options: I
 
   notes.push(
     "Tiers were assigned by price alone, which is a proxy for capability and not the same thing. " +
-      "Treat this as a starting point and adjust after seeing what /autoroute explain says about real prompts.",
+      "Treat this as a starting point and adjust after seeing what /autorouter explain says about real prompts.",
   );
 
   return { config, picks, notes };
