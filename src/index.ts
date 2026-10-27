@@ -28,6 +28,7 @@ import { defaultAdaptiveStorePath, readPersistedCells, writePersistedCells } fro
 import { classifyHeuristic } from "./classify/heuristic.ts";
 import { splitModelRef } from "./classify/llm.ts";
 import { type SemanticMatcher, buildSemanticMatcher } from "./classify/semantic.ts";
+import { ClassifierCircuitBreaker } from "./classify/decision-model.ts";
 import {
   type AutorouteState,
   DECISION_ENTRY_TYPE,
@@ -153,6 +154,13 @@ function configToJson(config: RouterConfig): Record<string, unknown> {
     customTechnicalKeywords: config.customTechnicalKeywords,
     classifierType: config.classifierType,
     ...(config.classifierLLMConfig ? { classifierLLMConfig: config.classifierLLMConfig } : {}),
+    ...(config.decisionClassifierConfig
+      ? {
+          decisionClassifierConfig: Object.fromEntries(
+            Object.entries(config.decisionClassifierConfig).filter(([, value]) => value !== null && value !== undefined),
+          ),
+        }
+      : {}),
     classifierFallback: config.classifierFallback,
     classifierContextWindowSize: config.classifierContextWindowSize,
     classifierContextPerTurnChars: config.classifierContextPerTurnChars,
@@ -221,6 +229,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   let adaptive: AdaptiveRouter | null = null;
   const adaptiveStorePath = defaultAdaptiveStorePath();
   let semantic: SemanticMatcher | null = null;
+  /** The decision classifier's timeout breaker; rebuilt, and so closed, on every config load. */
+  let decisionBreaker: ClassifierCircuitBreaker | null = null;
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
@@ -346,6 +356,10 @@ export default function autorouter(pi: ExtensionAPI): void {
     configMissing = loaded.missing;
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
+    const decision = config.classifierType === "decision" ? config.decisionClassifierConfig : null;
+    decisionBreaker = decision?.circuitBreakerEnabled
+      ? new ClassifierCircuitBreaker(decision.circuitBreakerCooldownSeconds)
+      : null;
   };
 
   /** Persist one complete effective config layer and activate it immediately. */
@@ -545,6 +559,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         callerSystemPrompt: undefined,
         adaptive,
         semantic,
+        decisionBreaker,
         ...(request.signal ? { signal: request.signal } : {}),
       });
     } catch (err) {
@@ -606,7 +621,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     pi.registerVirtualModel<BranchState>({
       provider: VIRTUAL_PROVIDER,
       id: VIRTUAL_MODEL_ID,
-      name: "Auto (LiteLLM router)",
+      name: "Auto router",
       // The selected level is the default for tier entries that do not set their own.
       thinkingLevels: THINKING_LEVELS,
       route: routeRequest,
@@ -997,11 +1012,17 @@ export default function autorouter(pi: ExtensionAPI): void {
             }`,
           );
           if (config) {
+            const llm = config.classifierType === "llm" ? config.classifierLLMConfig : null;
+            const decisionModel = config.classifierType === "decision" ? config.decisionClassifierConfig : null;
             lines.push(
               `classifier: ${config.classifierType}${
-                config.classifierLLMConfig
-                  ? ` (${config.classifierLLMConfig.model}, ${config.classifierLLMConfig.classificationRubric})`
-                  : ""
+                llm
+                  ? ` (${llm.model}, ${llm.classificationRubric})`
+                  : decisionModel
+                    ? ` (${decisionModel.model}, timeout ${decisionModel.timeoutMs}ms${
+                        decisionBreaker?.isOpen() ? ", circuit open" : ""
+                      })`
+                    : ""
               }`,
             );
             if (config.adaptive) {

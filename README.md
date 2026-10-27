@@ -24,13 +24,16 @@ prompt goes through: **extract → classify → override → select → route**.
 
 1. **Extract** - strip `<system-reminder>` blocks and pi's expanded `/skill:` blocks (harness plumbing, not
  something the user asked), pull out the current ask plus a few prior turns for context.
-2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Two classifiers are supported:
+2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Three classifiers are supported:
   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
    technical terms, length, etc.), no API call.
   - `llm` - a small model classifies the prompt against a rubric. The `agentic` rubric preset is the
   default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
   lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
   to agent traffic.
+  - `decision` - a [decision model](#example-decision-model-classifier-jev-clef) such as TypeSafe's
+  Jev or Cloudflare's Clef answers one typed `tier` question with probabilities, instead of generating
+  text.
 3. **Override** - a few signals outrank the classifier, in order: a one-shot `/autoroute next`, an
    `/autoroute pin` or `/autoroute off` / `--no-autoroute` escape hatch, a
    [question reply](#question-replies) (a turn that only answers a
@@ -177,6 +180,62 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
   }
 }
 ```
+
+### Example: decision-model classifier (Jev, Clef)
+
+A decision model doesn't chat: it answers typed questions about a request, with a probability for each
+answer. With `classifierType: "decision"`, the router asks one System One `choice` question named `tier`
+(each tier's meaning as the criteria) and sends the same request payload the `llm` classifier gets
+(current ask, prior turns, conversation depth) as the state. The call goes through one of pi's own
+classifier models, straight to the service that hosts it, with the credentials pi already has.
+
+`model` names the classifier model as `provider/model-id`, like every other model in this config. Hosted
+Jev, with `TYPESAFE_API_KEY` set (full file: [`examples/autorouter.jev.json`](examples/autorouter.jev.json)):
+
+```json
+{
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "typesafe/jev-latest", "timeoutMs": 3000 },
+  "classifierFallback": "heuristic"
+}
+```
+
+Cloudflare's Clef on Workers AI, with `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` set (full file:
+[`examples/autorouter.clef.json`](examples/autorouter.clef.json)):
+
+```json
+{
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "cloudflare-workers-ai/@cf/cloudflare/clef", "timeoutMs": 15000 }
+}
+```
+
+Any classifier model pi supports works, including ones a pi update or `models.json` adds later:
+
+| Decision model | `model` |
+| --- | --- |
+| Jev, TypeSafe | `typesafe/jev-latest` |
+| Jev, OpenRouter / Workers AI / Vercel AI Gateway / OpenCode | `openrouter/typesafe/jev-1.14`, `cloudflare-workers-ai/typesafe/jev`, `vercel-ai-gateway/typesafe-ai/jev`, `opencode/jev-1.13` |
+| Clef, Workers AI | `cloudflare-workers-ai/@cf/cloudflare/clef`, `cloudflare-workers-ai/@cf/cloudflare/clef-flash`, `cloudflare-workers-ai/@cf/cloudflare/clef-omni` |
+| Clef, OpenRouter | `openrouter/cloudflare/clef`, `openrouter/cloudflare/clef-flash`, `openrouter/cloudflare/clef-omni` |
+| OpenAI's Decisions API | `openai/gpt-6-luna` (needs `OPENAI_API_KEY`, not a ChatGPT login) |
+
+pi lists more; see pi's [classifier models](https://pi.dev/docs/latest/models#use-classifier-models).
+
+| Key (`decisionClassifierConfig`) | Default | Purpose |
+| --- | --- | --- |
+| `model` | `typesafe/jev-latest` | The classifier model, `provider/model-id` |
+| `timeoutMs` | `3000` | A hard deadline: the call is abandoned and `classifierFallback` applies |
+| `instructions` | built in | Replaces the question's instructions; the tier criteria stay |
+| `circuitBreakerEnabled` | `true` | One timeout skips the classifier, straight to `classifierFallback`, for the cooldown |
+| `circuitBreakerCooldownSeconds` | `30` | After it, one prompt probes; success closes the circuit, failure restarts the cooldown |
+
+There are no endpoint or key settings: pi owns the connection, so set keys with `/login` or the
+provider's environment variable, and endpoints in `models.json`. Decisions are logged as
+`cause=decision_classifier`, with the choice, its confidence and every tier's probability under `signals`;
+`/autoroute explain` also names the model and the call's cost. A tier with no models counts as a
+classifier failure, so `classifierFallback` decides instead. A `decisionClassifierConfig` left in place
+under another `classifierType` is ignored with a warning.
 
 ### Example: mixing providers
 
@@ -378,6 +437,7 @@ autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, s
 autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5, thinking=high, keyword="migration"
 autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
 autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=decision_classifier, tier=COMPLEX, signals=[typesafe-classifier:COMPLEX, typesafe-confidence=0.812000, tier-probability:SIMPLE=0.021000, tier-probability:MEDIUM=0.142000, tier-probability:COMPLEX=0.812000, tier-probability:REASONING=0.025000], routed_model=anthropic/claude-sonnet-5
 autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
 autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
 autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low

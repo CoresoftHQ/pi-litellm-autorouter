@@ -339,7 +339,7 @@ describe("example configs", () => {
   const load = (name: string) =>
     buildConfig([JSON.parse(readFileSync(new URL(`../examples/autorouter.${name}.json`, import.meta.url), "utf8"))]);
 
-  it.each(["heuristic", "llm"])("examples/autorouter.%s.json loads without errors", (name) => {
+  it.each(["heuristic", "llm", "jev", "clef"])("examples/autorouter.%s.json loads without errors", (name) => {
     const { config, errors, warnings } = load(name);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);

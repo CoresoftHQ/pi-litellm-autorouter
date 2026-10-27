@@ -75,6 +75,8 @@ export type DecisionCause =
   | "heuristic_scorer"
   | "reasoning_override"
   | "llm_classifier"
+  /** A decision model (Jev, Clef, ...) chose the tier. */
+  | "decision_classifier"
   | "literal_keyword_match"
   | "semantic_keyword_match"
   | "plan_mode"
@@ -102,6 +104,10 @@ export interface Classification {
   signals: string[];
   cause: DecisionCause;
   dimensions?: DimensionScore[];
+  /** The decision model that answered, as `provider/model-id`. */
+  classifierModel?: string;
+  /** What the classifier call cost in USD, when the service reported usage. */
+  classifierCost?: number;
 }
 
 /** The full record of one routing decision, persisted per turn. */
@@ -124,6 +130,10 @@ export interface RouteDecision {
   /** How the adaptive bandit chose, when `adaptive` is on and a tier was routed. Mirrors
    *  the `adaptive_router_decision` metadata LiteLLM stamps on the request. */
   adaptive?: AdaptiveDecision;
+  /** The decision model that classified the request (`cause: decision_classifier`). */
+  classifierModel?: string;
+  /** Cost of that classifier call in USD, when the service reported usage. */
+  classifierCost?: number;
 }
 
 export interface AdaptiveCandidate {

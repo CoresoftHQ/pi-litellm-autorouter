@@ -49,12 +49,25 @@ export function routingFailureNotice(decision: RouteDecision, heldModel: string 
   return `autoroute: ${target} could not use ${failure.model} (${reason}). ${outcome} Run /autoroute explain for all attempted models.`;
 }
 
-/** A non-fatal warning when the configured LLM classifier was bypassed. */
+/**
+ * A non-fatal warning when the configured LLM or decision classifier was bypassed.
+ *
+ * Not repeated while a decision classifier's circuit is open: the timeout that opened it
+ * already warned, and every prompt in the cooldown skipping it is the breaker working.
+ */
 export function classifierFallbackNotice(decision: RouteDecision): string | null {
-  const signal = decision.signals.find((value) => value.startsWith("llm_fallback ("));
-  if (!signal) return null;
-  const reason = signal.slice("llm_fallback (".length, -1);
-  return `autoroute: LLM classifier unavailable; used heuristic classification instead (${reason}).`;
+  if (decision.signals.includes("classifier-circuit-open")) return null;
+  for (const [prefix, name] of [
+    ["llm_fallback (", "LLM classifier"],
+    ["decision_fallback (", "decision classifier"],
+  ] as const) {
+    const signal = decision.signals.find((value) => value.startsWith(prefix));
+    if (signal) {
+      const reason = signal.slice(prefix.length, -1);
+      return `autoroute: ${name} unavailable; used heuristic classification instead (${reason}).`;
+    }
+  }
+  return null;
 }
 
 /** Compact footer text: `⏵ COMPLEX · claude-sonnet-5`. */
@@ -144,6 +157,10 @@ export function explain(decision: RouteDecision, dimensions?: { name: string; sc
   if (decision.matchedKeyword) lines.push(`keyword:  ${decision.matchedKeyword}`);
   if (decision.escalationKeyword) lines.push(`escalate: ${decision.escalationKeyword}`);
   if (decision.signals.length > 0) lines.push(`signals:  ${decision.signals.join(", ")}`);
+  if (decision.classifierModel) {
+    const cost = decision.classifierCost !== undefined ? ` ($${decision.classifierCost.toFixed(6)})` : "";
+    lines.push(`classifier: ${decision.classifierModel}${cost}`);
+  }
   lines.push(`latency:  ${decision.latencyMs}ms`);
   if (decision.fellBackBecause) lines.push(`fallback: ${decision.fellBackBecause}`);
 

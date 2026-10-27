@@ -878,6 +878,106 @@ describe("extension wiring", () => {
   });
 });
 
+describe("decision-model classifier wiring", () => {
+  const DECISION_CONFIG = {
+    ...CONFIG,
+    classifierType: "decision",
+    decisionClassifierConfig: { model: "openrouter/cloudflare/clef", timeoutMs: 20 },
+  };
+
+  beforeEach(() => isolateHome());
+  afterEach(() => restoreHome());
+
+  /** Clef in pi's classifier catalog, answering with `answer`. */
+  function withClef(h: ReturnType<typeof harness>, answer: () => Promise<unknown> | unknown) {
+    const classify = vi.fn(async (_model: unknown, _context: unknown, options?: { signal?: AbortSignal }) => {
+      const result = answer();
+      return result instanceof Promise
+        ? Promise.race([
+            result,
+            new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stopReason: "aborted" }))),
+          ])
+        : result;
+    });
+    h.ctx.modelRegistry.findOfType = (type: string, provider: string, id: string) =>
+      type === "classifier" && provider === "openrouter" && id === "cloudflare/clef" ? { provider, id } : undefined;
+    h.ctx.modelRegistry.classify = classify;
+    return classify;
+  }
+
+  it("routes on Clef's tier and shows it in /autoroute", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const h = harness(m, projectDir(DECISION_CONFIG));
+    const classify = withClef(h, () => ({
+      provider: "openrouter",
+      model: "cloudflare/clef",
+      stopReason: "stop",
+      answers: { tier: { type: "choice", choice: "REASONING", probabilities: { REASONING: 0.9 }, confidence: 0.9 } },
+    }));
+    await h.start();
+
+    const routed = await h.prompt("hi");
+
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(refOf(routed.model)).toBe("anthropic/opus");
+    expect(routed.thinkingLevel).toBe("high");
+    const decision = m.decisions()[0]!;
+    expect(decision.cause).toBe("decision_classifier");
+    expect(decision.classifierModel).toBe("openrouter/cloudflare/clef");
+
+    await m.commands.get("autoroute")!.handler("", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("classifier: decision (openrouter/cloudflare/clef, timeout 20ms)"),
+      "info",
+    );
+  });
+
+  it("warns once on a timeout, then skips the classifier while its circuit is open", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const h = harness(m, projectDir(DECISION_CONFIG));
+    const classify = withClef(h, () => new Promise(() => {}));
+    await h.start();
+
+    expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
+    expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
+
+    // The breaker outlives a single prompt: the second one never reached Clef.
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(m.decisions().map((d) => d.cause)).toEqual(["heuristic_scorer", "heuristic_scorer"]);
+    expect(m.decisions()[1]?.signals).toContain("classifier-circuit-open");
+    const warnings = (h.ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.filter(([, level]) => level === "warning");
+    expect(warnings).toEqual([
+      [
+        "autoroute: decision classifier unavailable; used heuristic classification instead (decision classifier timed out after 20ms).",
+        "warning",
+      ],
+    ]);
+    await m.commands.get("autoroute")!.handler("", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("circuit open"), "info");
+  });
+
+  it("keeps the block when settings are edited from the slash command", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const dir = projectDir(DECISION_CONFIG);
+    const h = harness(m, dir);
+    await h.start();
+
+    await m.commands.get("autoroute")!.handler("set decisionClassifierConfig.timeoutMs 15000", h.ctx);
+
+    const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
+    expect(written.classifierType).toBe("decision");
+    expect(written.decisionClassifierConfig).toEqual({
+      model: "openrouter/cloudflare/clef",
+      timeoutMs: 15000,
+      circuitBreakerEnabled: true,
+      circuitBreakerCooldownSeconds: 30,
+    });
+  });
+});
+
 describe("adaptive wiring", () => {
   let dir: string;
 

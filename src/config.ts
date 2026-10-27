@@ -39,7 +39,7 @@ import {
   isTier,
 } from "./types.ts";
 
-export type ClassifierType = "heuristic" | "llm";
+export type ClassifierType = "heuristic" | "llm" | "decision";
 export type ClassifierFallback = "heuristic" | "default_model";
 export type ClassificationRubric = "legacy" | "agentic" | "chat" | "business";
 
@@ -61,6 +61,27 @@ export interface ClassifierLLMConfig {
   systemPrompt?: string;
 }
 
+/**
+ * The decision-model classifier (`classifierType: "decision"`).
+ *
+ * `model` names one of pi's classifier models as `provider/model-id`, like every other model in
+ * this config. pi owns the connection to it, so there are no endpoint or key settings here.
+ */
+export interface DecisionClassifierConfig {
+  /** A classifier model in pi's catalog, as `provider/model-id`. */
+  model: ModelRef;
+  timeoutMs: number;
+  /** Replaces the built-in classification instructions. */
+  instructions?: string;
+  /** One timeout sends later requests through `classifierFallback` for the cooldown. */
+  circuitBreakerEnabled: boolean;
+  circuitBreakerCooldownSeconds: number;
+}
+
+/** TypeSafe's hosted Jev. */
+export const DEFAULT_DECISION_CLASSIFIER_MODEL = "typesafe/jev-latest";
+export const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 30;
+
 export interface RouterConfig {
   enabled: boolean;
   defaultModel: ModelRef | null;
@@ -81,6 +102,8 @@ export interface RouterConfig {
   customTechnicalKeywords: string[];
   classifierType: ClassifierType;
   classifierLLMConfig: ClassifierLLMConfig | null;
+  /** Required when `classifierType` is `decision`. */
+  decisionClassifierConfig: DecisionClassifierConfig | null;
   classifierFallback: ClassifierFallback;
   classifierContextWindowSize: number;
   classifierContextPerTurnChars: number;
@@ -175,6 +198,7 @@ export function defaultConfig(): RouterConfig {
     customTechnicalKeywords: [],
     classifierType: "heuristic",
     classifierLLMConfig: null,
+    decisionClassifierConfig: null,
     classifierFallback: "heuristic",
     classifierContextWindowSize: DEFAULT_CLASSIFIER_CONTEXT_WINDOW_SIZE,
     classifierContextPerTurnChars: DEFAULT_CLASSIFIER_CONTEXT_PER_TURN_CHARS,
@@ -355,11 +379,15 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   }
 
   if (raw.classifierType !== undefined) {
-    if (raw.classifierType === "heuristic" || raw.classifierType === "llm") {
+    if (raw.classifierType === "heuristic" || raw.classifierType === "llm" || raw.classifierType === "decision") {
       config.classifierType = raw.classifierType;
     } else {
-      errors.push(`classifierType must be "heuristic" or "llm"`);
+      errors.push(`classifierType must be "heuristic", "llm" or "decision"`);
     }
+  }
+
+  if (raw.decisionClassifierConfig !== undefined) {
+    config.decisionClassifierConfig = parseDecisionClassifierConfig(raw.decisionClassifierConfig, errors);
   }
 
   if (raw.classifierLLMConfig !== undefined) {
@@ -667,6 +695,14 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   if (config.classifierType === "llm" && !config.classifierLLMConfig) {
     errors.push('classifierType is "llm" but classifierLLMConfig is missing');
   }
+  if (config.classifierType === "decision" && raw.decisionClassifierConfig === undefined) {
+    errors.push('decisionClassifierConfig is required when classifierType is "decision"');
+  }
+  if (config.classifierType !== "decision" && config.decisionClassifierConfig) {
+    // A warning, not an error: `/autoroute set classifierType llm` has to be able to switch
+    // classifiers without first deleting the block it switches from.
+    warnings.push('decisionClassifierConfig has no effect unless classifierType is "decision"');
+  }
   const configuredTiers = TIER_SEVERITY_ORDER.filter((t) => config.tiers[t].length > 0);
   if (configuredTiers.length === 0 && !config.defaultModel) {
     errors.push("no tiers and no defaultModel are configured, so there is nothing to route to");
@@ -700,6 +736,91 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
   if (errors.length > 0) config.enabled = false;
 
   return { config, warnings, errors };
+}
+
+const DECISION_CLASSIFIER_KEYS = new Set([
+  "model",
+  "timeoutMs",
+  "instructions",
+  "circuitBreakerEnabled",
+  "circuitBreakerCooldownSeconds",
+]);
+
+/** Connection settings someone might reach for, and where pi keeps them instead. */
+const CONNECTION_KEYS: Readonly<Record<string, string>> = {
+  apiKey: "pi owns the connection; set the provider's key with /login or its environment variable",
+  apiBase: "pi owns the connection; set the provider's baseUrl in models.json",
+};
+
+function parseDecisionClassifierConfig(value: unknown, errors: string[]): DecisionClassifierConfig | null {
+  const block = "decisionClassifierConfig";
+  if (!isRecord(value)) {
+    errors.push(`${block} must be an object`);
+    return null;
+  }
+  const parsed: DecisionClassifierConfig = {
+    model: DEFAULT_DECISION_CLASSIFIER_MODEL,
+    timeoutMs: DEFAULT_CLASSIFIER_TIMEOUT_MS,
+    circuitBreakerEnabled: true,
+    circuitBreakerCooldownSeconds: DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+  };
+  let ok = true;
+  const fail = (message: string): void => {
+    errors.push(`${block}.${message}`);
+    ok = false;
+  };
+
+  // Unknown keys are refused: a misspelt setting silently left at its default is worse than a
+  // config that refuses to load.
+  for (const key of Object.keys(value)) {
+    const replacement = CONNECTION_KEYS[key];
+    if (replacement) fail(`${key} is not supported here: ${replacement}`);
+    else if (!DECISION_CLASSIFIER_KEYS.has(key)) fail(`${key} is not a known setting`);
+  }
+
+  if (value.model !== undefined) {
+    const model = typeof value.model === "string" ? value.model.trim() : "";
+    if (model.indexOf("/") > 0 && !model.endsWith("/")) {
+      parsed.model = model;
+    } else {
+      fail(`model must name a classifier model as provider/model-id, e.g. ${DEFAULT_DECISION_CLASSIFIER_MODEL}`);
+    }
+  }
+
+  if (value.timeoutMs !== undefined) {
+    if (typeof value.timeoutMs === "number" && Number.isInteger(value.timeoutMs) && value.timeoutMs >= 1) {
+      parsed.timeoutMs = value.timeoutMs;
+    } else {
+      fail("timeoutMs must be a positive integer");
+    }
+  }
+
+  if (value.instructions !== undefined) {
+    if (typeof value.instructions === "string" && value.instructions.trim()) {
+      parsed.instructions = value.instructions;
+    } else {
+      fail("instructions must be non-empty; omit it to use the default");
+    }
+  }
+
+  if (value.circuitBreakerEnabled !== undefined) {
+    if (typeof value.circuitBreakerEnabled === "boolean") {
+      parsed.circuitBreakerEnabled = value.circuitBreakerEnabled;
+    } else {
+      fail("circuitBreakerEnabled must be a boolean");
+    }
+  }
+
+  if (value.circuitBreakerCooldownSeconds !== undefined) {
+    const cooldown = value.circuitBreakerCooldownSeconds;
+    if (typeof cooldown === "number" && Number.isFinite(cooldown) && cooldown > 0) {
+      parsed.circuitBreakerCooldownSeconds = cooldown;
+    } else {
+      fail("circuitBreakerCooldownSeconds must be a number greater than 0");
+    }
+  }
+
+  return ok ? parsed : null;
 }
 
 function readJsonIfPresent(path: string, errors: string[]): { value: unknown; present: boolean } {

@@ -8,7 +8,7 @@
  *   2. session-affinity pin              (skips classification entirely)
  *   3. plan-mode floor, when it is the top configured tier (skips the classifier call)
  *   4. keyword tier rules
- *   4. classifier (llm, falling back per `classifierFallback`; else heuristic)
+ *   4. classifier (llm or decision model, falling back per `classifierFallback`; else heuristic)
  *   then: escalation keyword (+1 tier), then plan-mode floor
  *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
  *
@@ -28,6 +28,7 @@ import {
   resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
 import type { SemanticMatcher } from "./classify/semantic.ts";
+import { type ClassifierCircuitBreaker, type DecisionRegistry, classifyWithDecisionModel } from "./classify/decision-model.ts";
 import { type ModelLookup, type Rng, candidatesForTier, defaultTarget, resolveFirstUsable } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
@@ -55,7 +56,9 @@ export interface RouteInput {
   config: RouterConfig;
   /** Where candidates are resolved: pi's model registry in production. */
   models: ModelLookup;
-  registry?: ClassifierRegistry;
+  /** pi's model registry: chat completion for the LLM classifier, `classify()` for decision
+   *  models. */
+  registry?: ClassifierRegistry & DecisionRegistry;
   /** pi's own plan-mode state, read directly rather than sniffed out of prompt text. */
   planModeActive?: boolean;
   /** The active session pin, if session affinity is on and one has been set. */
@@ -78,8 +81,11 @@ export interface RouteInput {
   semantic?: SemanticMatcher | null;
   /** Uniform draw in [0, 1) for the pool pick; defaults to `Math.random`. */
   rng?: Rng;
-  /** The request's abort signal; cancels an in-flight LLM classifier call. */
+  /** The request's abort signal; cancels an in-flight classifier call. */
   signal?: AbortSignal;
+  /** The decision classifier's timeout breaker, when it is enabled. Lives as long as the
+   *  router does, so one unhealthy classifier cannot charge its timeout to every prompt. */
+  decisionBreaker?: ClassifierCircuitBreaker | null;
 }
 
 export interface RouteOutput {
@@ -130,9 +136,22 @@ export function planModeSignal(input: RouteInput): string | null {
   return null;
 }
 
-async function classify(input: RouteInput): Promise<Classification | { failed: string }> {
+async function classify(input: RouteInput): Promise<Classification | { failed: string; signals?: string[] }> {
   const { turn, config, registry } = input;
   if (!turn.currentAsk) return { failed: "no user message" };
+
+  if (config.classifierType === "decision") {
+    const outcome = registry
+      ? await classifyWithDecisionModel(turn, config, registry, input.decisionBreaker ?? null, {
+          ...(input.callerSystemPrompt !== undefined ? { callerSystemPrompt: input.callerSystemPrompt } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
+        })
+      : { ok: false as const, reason: "decision classifier has no model registry", signals: [] };
+    if (outcome.ok) return outcome.classification;
+    if (config.classifierFallback === "default_model") return { failed: outcome.reason, signals: outcome.signals };
+    const heuristic = classifyHeuristic(turn.currentAsk, config);
+    return { ...heuristic, signals: [...heuristic.signals, `decision_fallback (${outcome.reason})`, ...outcome.signals] };
+  }
 
   if (config.classifierType === "llm" && registry) {
     const outcome = await classifyWithLLM(turn, config, registry, input.callerSystemPrompt, input.signal);
@@ -358,7 +377,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
 
   if ("failed" in classification) {
     decision.cause = "default_model_fallback";
-    decision.signals = [...decision.signals, classification.failed];
+    decision.signals = [...decision.signals, classification.failed, ...(classification.signals ?? [])];
     // A sentinel-carrying request skips this exit: defaultModel carries no tier guarantee,
     // so a plan-mode request must land in the floor's pool, which is the only destination
     // the floor can vouch for.
@@ -373,6 +392,8 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   decision.score = classification.score ?? null;
   decision.signals = [...decision.signals, ...classification.signals];
   decision.cause = classification.cause;
+  if (classification.classifierModel) decision.classifierModel = classification.classifierModel;
+  if (classification.classifierCost !== undefined) decision.classifierCost = classification.classifierCost;
 
   let tier = classification.tier;
   if (escalationKeyword) {

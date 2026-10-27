@@ -1,0 +1,24 @@
+{
+  "defaultModel": {
+    "model": "anthropic/claude-haiku-4-5",
+    "thinkingLevel": "low"
+  },
+  "classifierType": "decision",
+  "decisionClassifierConfig": {
+    "model": "cloudflare-workers-ai/@cf/cloudflare/clef",
+    "timeoutMs": 15000
+  },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": false,
+  "tiers": {
+    "SIMPLE": "anthropic/claude-haiku-4-5",
+    "MEDIUM": "anthropic/claude-sonnet-5",
+    "COMPLEX": "anthropic/claude-sonnet-5",
+    "REASONING": {
+      "model": "anthropic/claude-opus-5",
+      "thinkingLevel": "high"
+    }
+  }
+}
