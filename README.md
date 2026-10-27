@@ -568,6 +568,10 @@ npm test           # vitest run
   the thinking level selected on `autoroute/auto` is the default for tiers without their own
 - Add the decision-model classifier (`classifierType: "decision"`) for Jev, Clef and any other classifier
   model pi supports
+- `classifierContextIncludeAssistantTurns` now quotes only the assistant's latest text reply, and it no longer
+  takes a context-window slot from your own prompts
+- Example configs use the latest models, and a new `examples/autorouter.recommended.json` pairs the
+  mixed-provider tiers with the Jev classifier
 
 ### 1.3.0
 
