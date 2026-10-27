@@ -14,9 +14,10 @@ export const STATE_ENTRY_TYPE = "autoroute-state";
 
 /** Persisted session state: the user's own overrides, which outrank the router. */
 export interface AutorouteState {
-  /** Routing disabled for this session via `/autoroute off`. */
+  /** Routing paused for this session via `/autoroute off`: the router holds the model
+   *  already serving the session instead of classifying prompts. */
   disabled?: boolean;
-  /** A model the user pinned by hand; the router leaves the session alone while set. */
+  /** A model pinned with `/autoroute pin`; every prompt is routed to it while set. */
   pinnedModel?: string | null;
   /** A model (and optional thinking level) forced for the next prompt only, then
    *  cleared. Outranks everything else, including `disabled` and `pinnedModel`. */
@@ -33,13 +34,19 @@ function firstFailedCandidate(decision: RouteDecision): { model: string; reason:
   return match ? { model: match[1]!, reason: match[2]! } : null;
 }
 
-/** A concise, actionable failure toast; `/autoroute explain` contains the entire chain. */
-export function routingFailureNotice(decision: RouteDecision): string | null {
+/**
+ * A concise, actionable failure toast; `/autoroute explain` contains the entire chain.
+ *
+ * `heldModel` is the model the request went to instead (the one already serving the
+ * session); null when there was none and the request fails.
+ */
+export function routingFailureNotice(decision: RouteDecision, heldModel: string | null): string | null {
   const failure = firstFailedCandidate(decision);
   if (!failure) return null;
   const target = decision.tier ? `${decision.tier} tier` : "default route";
   const reason = failure.reason.replace(/^has /, "");
-  return `autoroute: ${target} could not use ${failure.model} (${reason}). Keeping current model. Run /autoroute explain for all attempted models.`;
+  const outcome = heldModel ? `Keeping current model (${heldModel}).` : "No configured model is usable.";
+  return `autoroute: ${target} could not use ${failure.model} (${reason}). ${outcome} Run /autoroute explain for all attempted models.`;
 }
 
 /** A non-fatal warning when the configured LLM classifier was bypassed. */

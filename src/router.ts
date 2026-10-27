@@ -12,8 +12,9 @@
  *   then: escalation keyword (+1 tier), then plan-mode floor
  *   then, on the classifier path only and with `adaptive` on: the Thompson-sampled pick
  *
- * This module is deliberately free of pi imports: it takes an applier and a registry, so
- * the whole decision path is testable without a running agent.
+ * This module is deliberately free of pi imports: it takes a model lookup and a registry,
+ * so the whole decision path is testable without a running agent. It never selects a
+ * model itself — it returns the one the virtual model's router should route to.
  */
 
 import type { RouterConfig } from "./config.ts";
@@ -27,7 +28,7 @@ import {
   resolveKeywordTierOverride,
 } from "./classify/keywords.ts";
 import type { SemanticMatcher } from "./classify/semantic.ts";
-import { type ModelApplier, type Rng, applyFirstUsable, candidatesForTier, defaultTarget } from "./resolve.ts";
+import { type ModelLookup, type Rng, candidatesForTier, defaultTarget, resolveFirstUsable } from "./resolve.ts";
 import type { AdaptiveRouter } from "./adaptive/router.ts";
 import { softFloorPick, targetForModel } from "./adaptive/select.ts";
 import type { Classification, ExtractedTurn, RouteDecision, Tier, TierTarget } from "./types.ts";
@@ -52,7 +53,8 @@ export interface QuestionReplySignal {
 export interface RouteInput {
   turn: ExtractedTurn;
   config: RouterConfig;
-  api: ModelApplier;
+  /** Where candidates are resolved: pi's model registry in production. */
+  models: ModelLookup;
   registry?: ClassifierRegistry;
   /** pi's own plan-mode state, read directly rather than sniffed out of prompt text. */
   planModeActive?: boolean;
@@ -76,10 +78,15 @@ export interface RouteInput {
   semantic?: SemanticMatcher | null;
   /** Uniform draw in [0, 1) for the pool pick; defaults to `Math.random`. */
   rng?: Rng;
+  /** The request's abort signal; cancels an in-flight LLM classifier call. */
+  signal?: AbortSignal;
 }
 
 export interface RouteOutput {
   decision: RouteDecision;
+  /** pi's model object for `decision.chosenModel`; null when no model was chosen (a held
+   *  turn, or a chain with nothing usable in it). */
+  target: unknown;
   /** The pin to store for this session, or null to leave the existing one alone. */
   pinToWrite: SessionPin | null;
   /** True when a one-shot override was used up on this turn and the caller should clear
@@ -128,7 +135,7 @@ async function classify(input: RouteInput): Promise<Classification | { failed: s
   if (!turn.currentAsk) return { failed: "no user message" };
 
   if (config.classifierType === "llm" && registry) {
-    const outcome = await classifyWithLLM(turn, config, registry, input.callerSystemPrompt);
+    const outcome = await classifyWithLLM(turn, config, registry, input.callerSystemPrompt, input.signal);
     if (outcome.ok) return outcome.classification;
     if (config.classifierFallback === "default_model") return { failed: outcome.reason };
     // "heuristic" fallback: score locally and carry on. The signal records that the LLM
@@ -141,15 +148,15 @@ async function classify(input: RouteInput): Promise<Classification | { failed: s
 }
 
 /**
- * Decide and apply the model for one turn.
+ * Decide the model for one turn.
  *
- * Never throws: every path either applies a model or returns a decision explaining why
- * the session's current model was left alone.
+ * Never throws: every path either resolves a model or returns a decision explaining why
+ * none was chosen, so the caller can keep the model the session was already on.
  */
 export async function route(input: RouteInput): Promise<RouteOutput> {
   const now = input.now ?? Date.now;
   const startedAt = now();
-  const { config, turn, api } = input;
+  const { config, turn, models } = input;
   const rng = input.rng ?? Math.random;
   const decision = emptyDecision();
 
@@ -187,22 +194,23 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     const candidates =
       explicitCandidates ??
       (tier ? candidatesForTier(tier, config, rng) : [defaultTarget(config)].filter((t): t is TierTarget => t !== null));
-    const { applied, problems } = await applyFirstUsable(candidates, api);
+    const { resolved, problems } = resolveFirstUsable(candidates, models);
     decision.tier = tier;
     decision.latencyMs = now() - startedAt;
-    if (applied) {
-      decision.chosenModel = applied.model;
-      decision.thinkingLevel = applied.thinkingLevel;
-      if (applied.fellBackBecause) decision.fellBackBecause = applied.fellBackBecause;
-      // A pin is only worth writing for a model that was actually applied.
+    if (resolved) {
+      decision.chosenModel = resolved.model;
+      decision.thinkingLevel = resolved.thinkingLevel;
+      if (resolved.fellBackBecause) decision.fellBackBecause = resolved.fellBackBecause;
+      // A pin is only worth writing for a model that can actually serve the request.
       return {
         decision,
-        pinToWrite: pinToWrite ? { ...pinToWrite, model: applied.model } : null,
+        target: resolved.target,
+        pinToWrite: pinToWrite ? { ...pinToWrite, model: resolved.model } : null,
         consumedOneShot,
       };
     }
     if (problems.length > 0) decision.fellBackBecause = problems.join("; ");
-    return { decision, pinToWrite: null, consumedOneShot };
+    return { decision, target: null, pinToWrite: null, consumedOneShot };
   };
 
   // ── 0. One-shot override ───────────────────────────────────────────────────
@@ -217,8 +225,8 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
     const target = typeof input.oneShot === "string" ? { model: input.oneShot } : input.oneShot;
     const result = await finish(null, null, [target]);
     if (result.decision.chosenModel) return result;
-    // Could not be applied. Rather than leave the turn on whatever model happened to be
-    // active, fall through to ordinary routing — the decision record keeps the reason.
+    // Not usable. Rather than leave the turn on whatever model happened to be active, fall
+    // through to ordinary routing — the decision record keeps the reason.
     decision.cause = "default_fallback";
     decision.fellBackBecause = `one-shot override "${target.model}" could not be applied${
       result.decision.fellBackBecause ? `: ${result.decision.fellBackBecause}` : ""
@@ -237,7 +245,7 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
   // "ok" is not a request for cheap work, it is the second half of the request already in
   // flight. Scoring it would drop the session onto the SIMPLE tier and then hand the
   // answer to that model, which is the opposite of what answering a question is for. So
-  // the turn is not classified at all and no model is applied: whatever asked the question
+  // the turn is not classified at all and no model is chosen: whatever asked the question
   // is what acts on the answer.
   //
   // Ranked above the session pin because holding is the stronger guarantee — a pin
@@ -269,14 +277,14 @@ export async function route(input: RouteInput): Promise<RouteOutput> {
       return finish(tier, null);
     }
 
-    // The hold itself. No candidate is resolved and `setModel` is never called, so this is
-    // the one path that cannot change the session's model even by falling back. `tier`
-    // carries the last known tier forward so a run of consecutive replies still has
-    // something to escalate from.
+    // The hold itself. No candidate is resolved, so this is the one path that cannot change
+    // the session's model even by falling back: the caller routes the reply to the model
+    // that asked. `tier` carries the last known tier forward so a run of consecutive
+    // replies still has something to escalate from.
     decision.cause = "question_reply";
     decision.tier = lastTier;
     decision.latencyMs = now() - startedAt;
-    return { decision, pinToWrite: null, consumedOneShot };
+    return { decision, target: null, pinToWrite: null, consumedOneShot };
   }
 
   // ── 2. Session-affinity pin ────────────────────────────────────────────────

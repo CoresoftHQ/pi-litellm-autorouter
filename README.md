@@ -7,20 +7,23 @@ in-process, no proxy required.
 
 pi normally uses one model for a whole session, switched by hand with `/model`. That's wasteful: a trivial
 question ("what does this env var do?") doesn't need the same model as a hard debugging session. This
-extension classifies every prompt before it runs and calls `pi.setModel()` to route it to the right tier -
-so cheap prompts go to cheap models and hard prompts go to strong ones, automatically.
+extension adds a [virtual model](https://pi.dev/docs/latest/virtual-models), **`autoroute/auto`**. Select it
+like any other model, and every prompt is classified before it runs and routed to the right tier - so cheap
+prompts go to cheap models and hard prompts go to strong ones, automatically.
 
 It's a TypeScript port of [LiteLLM's Auto Router v2](https://docs.litellm.ai/docs/proxy/auto_routing)
-(`auto_router/complexity_router`), adapted to run inside pi's extension API instead of behind a separate
-LiteLLM proxy process. That means no extra network hop, and pi's UI/thinking-level/credential logic can see
-the model that was actually picked.
+(`auto_router/complexity_router`), adapted to run inside pi instead of behind a separate LiteLLM proxy
+process. That means no extra network hop, and pi itself knows which model answered: the footer shows the
+routed model next to the selection (`auto • medium → claude-sonnet-5 • high`), each assistant message
+records it, and `/session` lists the cost per physical model.
 
 ## How it works
 
-Each user prompt goes through: **extract → classify → override → select → apply**.
+While `autoroute/auto` is selected, pi asks the router for a physical model before every request. Each new
+prompt goes through: **extract → classify → override → select → route**.
 
-1. **Extract** - strip `<system-reminder>` blocks (harness plumbing, not something the user asked), pull out
- the current ask plus a few prior turns for context.
+1. **Extract** - strip `<system-reminder>` blocks and pi's expanded `/skill:` blocks (harness plumbing, not
+ something the user asked), pull out the current ask plus a few prior turns for context.
 2. **Classify** - score the prompt into one of four tiers, `SIMPLE` → `MEDIUM` → `COMPLEX` → `REASONING`. Two classifiers are supported:
   - `heuristic` (default) - a local, sub-millisecond weighted scorer (code presence, reasoning markers,
    technical terms, length, etc.), no API call.
@@ -28,8 +31,9 @@ Each user prompt goes through: **extract → classify → override → select �
   default here, calibrated so routine engineering work (installs, multi-file edits, standard debugging)
   lands at `MEDIUM` instead of being over-classified as top-tier, which is what a chat-tuned rubric does
   to agent traffic.
-3. **Override** - a few signals outrank the classifier, in order: an explicit `/model` pin or
-   `--no-autoroute` escape hatch, a [question reply](#question-replies) (a turn that only answers a
+3. **Override** - a few signals outrank the classifier, in order: a one-shot `/autoroute next`, an
+   `/autoroute pin` or `/autoroute off` / `--no-autoroute` escape hatch, a
+   [question reply](#question-replies) (a turn that only answers a
    question the assistant asked keeps the model it was asked with), a session-affinity pin (reuse the
    first turn's model for the whole session, if enabled), `keywordTierRules` (keyword → tier, literal or
    [semantic](#semantic-keyword-matching)), and a plan-mode floor (routes at least to a configured tier
@@ -38,16 +42,39 @@ Each user prompt goes through: **extract → classify → override → select �
 4. **Select** - a tier maps to one model or a pool of models (a uniformly random pick), or, with
    `adaptive: true`, a Thompson-sampled pick across the pools weighted by learned quality, price, and
    distance from the classified tier. See [Adaptive selection](#adaptive-selection).
-5. **Apply** - resolve the chosen model against pi's own model registry and credentials; call
-   `pi.setModel()` (falling back down the chain, then to `defaultModel`, if a model has no credentials),
-   then `pi.setThinkingLevel()`, and record the decision (visible via `/autoroute explain` and the footer
-   status).
+5. **Route** - resolve the chosen model against pi's own model registry and credentials (falling back down
+   the chain, then to `defaultModel`, if a model has no credentials), hand it to pi with its thinking level,
+   and record the decision (visible via `/autoroute explain` and the footer status). The selection stays
+   `autoroute/auto`; nothing calls `pi.setModel()`.
 
-Routing never fails a prompt: any classifier error or unresolved model falls back to `defaultModel`, and the
-model is chosen once per prompt and held for the whole agent turn (including all its tool calls) - it never
-switches mid-turn.
+The model is chosen once per prompt and held for the whole agent run - it never switches mid-run. Only the
+first request of a prompt is classified; everything else stays on the model already serving the
+conversation, which keeps prompt caches and thinking signatures valid:
+
+| Request | Routed to |
+| --- | --- |
+| A prompt you typed (or sent over RPC, or with `pi -p`) | Classified and routed |
+| Tool-call continuations within the run | The model serving the run |
+| Automatic retries, including after compaction for a context overflow | The model that failed |
+| Steering and follow-up messages queued while the run is in flight | The model serving the run |
+| Prompts other extensions send with `pi.sendUserMessage()` | The model serving the session |
+| Compaction summaries and other requests outside the agent loop | The model serving the session, else `defaultModel` |
+
+Routing rarely fails a prompt: a classifier error falls back per `classifierFallback`, an unusable model
+falls down the chain, and when nothing in the chain is usable the request stays on the model already
+serving the session. Only when there is no such model either does the request end with an error that
+names the models it tried.
+
+### Thinking levels
+
+`autoroute/auto` offers every thinking level, from `off` to `max`. The level you select is the default for
+tier entries that don't set their own: with `autoroute/auto • low`, a plain `"anthropic/claude-sonnet-5"`
+entry runs at `low`, while `{ "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }` always runs at
+`high`. pi clamps the result to what the routed model supports.
 
 ## Installation
+
+Requires pi 0.99 or later (virtual models).
 
 ```bash
 pi install npm:@coresofthq/pi-litellm-autorouter
@@ -55,8 +82,19 @@ pi install npm:@coresofthq/pi-litellm-autorouter
 ```
 
 `/autoroute init` reads the models pi can reach, ranks them by price, and writes a starter config to
-`~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override). Edit the tiers from
-there - price is only a proxy for capability, not the same thing.
+`~/.pi/agent/autorouter.json` (or `.pi/autorouter.json` for a project-local override), then selects
+`autoroute/auto` for the session. Edit the tiers from there - price is only a proxy for capability, not the
+same thing.
+
+To route every session, pick `autoroute/auto` in `/model` (or start pi with `--model autoroute/auto`), or
+make it the default in `~/.pi/agent/settings.json`:
+
+```json
+{ "defaultProvider": "autoroute", "defaultModel": "auto" }
+```
+
+Selecting any other model takes the router out of the loop until you select `autoroute/auto` again (or run
+`/autoroute on`). With `enabledModels` / `--models` scoping, add `autoroute/auto` to the list.
 
 ### The minimum config
 
@@ -72,7 +110,8 @@ there - price is only a proxy for capability, not the same thing.
 }
 ```
 
-Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. `defaultModel` takes the same
+Model names are `provider/model-id`, exactly as pi's `/model` picker shows them. They must be physical models:
+a virtual model, `autoroute/auto` included, cannot be routed to and is skipped. `defaultModel` takes the same
 shape as a tier entry, so it can carry a thinking level too:
 
 ```json
@@ -213,9 +252,10 @@ autoroute: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=a
 autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
 ```
 
-`routed_model=(unchanged)` is literal: on this path no candidate is resolved and `pi.setModel()` is never
-called, so it is the one decision that cannot move the model even by falling back. The footer reads
-`autoroute: held (question reply)`.
+`routed_model=(unchanged)` is literal: on this path no candidate is resolved and the request goes to the
+model that asked the question, so it is the one decision that cannot move the model even by falling back.
+The footer reads `autoroute: held (question reply)`. The tier it holds at is kept as router state on the
+session branch, so it survives a resume, a fork, and compaction.
 
 A turn has to pass **both** tests to be held:
 
@@ -346,7 +386,7 @@ autoroute: routing decision cause=default_model_fallback, signals=[classifier ti
 pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallback`, the adaptive phase under
 `signals`) appear only when set, after upstream's fields.
 
-- **Interactive mode**: the line is drawn dimly in the chat, just above the prompt it routed. It is a rendering
+- **Interactive mode**: the line is drawn dimly in the chat, just below the prompt it routed. It is a rendering
 of the decision entry the extension already records in the session, so it costs no tokens, never reaches the
 model, and is redrawn when a session is resumed. Press **ctrl+o** (expand tool output) to swap every line for
 the full breakdown `/autoroute explain` would show.
@@ -367,10 +407,10 @@ the full breakdown `/autoroute explain` would show.
 | `/autoroute set [global\|project] <setting.path> <JSON value>`                             | Persist any router setting (project scope by default)                              |
 | `/autoroute tier <tier> <model> [thinking-level]`                                            | Set a tier's model and optional thinking level                                     |
 | `/autoroute next <model> [thinking-level]`                                                   | Force a model and optional thinking level for the next prompt only                 |
-| `/autoroute pin <model>`                                                                     | Freeze on one model until unpinned                                                  |
-| `/autoroute escalate`                                                                       | Re-run the last prompt one tier up                                                  |
-| `/autoroute off` / `on`                                                                     | Toggle routing for the session                                                      |
-| `--no-autoroute`                                                                            | CLI flag to start a session with routing disabled                                   |
+| `/autoroute pin [model]`                                                                     | Route every prompt to one model (default: the one serving the session) until `unpin` |
+| `/autoroute off`                                                                            | Pause routing for the session: `autoroute/auto` keeps the model it is on            |
+| `/autoroute on`                                                                             | Resume routing (clears `off`, `pin`, and `next`) and select `autoroute/auto`        |
+| `--no-autoroute`                                                                            | CLI flag to start a session with routing paused                                     |
 
 
 `set` accepts dotted config paths and JSON values, so it covers every `autorouter.json`
@@ -389,9 +429,10 @@ setting without restarting Pi. For example:
 
 ## Disabling the extension
 
-`/autoroute off` only pauses routing for the current session, and `--no-autoroute` only for one launch. To
-stop the extension from loading at all - for instance because you'd rather let an external LiteLLM proxy
-do the routing - use pi's own mechanisms:
+Routing only happens while `autoroute/auto` is selected, so picking another model in `/model` is enough to
+stop it. `/autoroute off` pauses routing for the current session without leaving `autoroute/auto`, and
+`--no-autoroute` does the same for one launch. To stop the extension from loading at all - for instance
+because you'd rather let an external LiteLLM proxy do the routing - use pi's own mechanisms:
 
 - **Toggle it interactively**: run `pi config`, find the extension, and disable it. Tab switches between global
 (`~/.pi/agent/settings.json`) and project-local (`.pi/settings.json`) scope; `pi config -l` starts in the

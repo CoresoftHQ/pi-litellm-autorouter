@@ -9,7 +9,7 @@ import {
   routesFromRules,
 } from "../src/classify/semantic.ts";
 import { buildConfig } from "../src/config.ts";
-import type { ModelApplier } from "../src/resolve.ts";
+import type { ModelLookup } from "../src/resolve.ts";
 import { route } from "../src/router.ts";
 import type { ExtractedTurn } from "../src/types.ts";
 
@@ -62,12 +62,8 @@ function turn(currentAsk: string | null): ExtractedTurn {
   return { currentAsk, priorTurns: [], conversationContinuing: false, cumulativeTokens: 0 };
 }
 
-function applier(): ModelApplier {
-  return {
-    find: (provider, modelId) => ({ provider, id: modelId }),
-    setModel: async () => true,
-    setThinkingLevel: () => {},
-  };
+function lookup(): ModelLookup {
+  return { find: (provider, modelId) => ({ provider, id: modelId }), hasConfiguredAuth: () => true };
 }
 
 describe("cosineSimilarity", () => {
@@ -259,7 +255,7 @@ describe("route — semantic keyword matching", () => {
     const { decision } = await route({
       turn: turn("help me roll out my k8s cluster today"),
       config,
-      api: applier(),
+      models: lookup(),
       semantic,
       now: () => 0,
     });
@@ -275,7 +271,7 @@ describe("route — semantic keyword matching", () => {
     const semantic = new SemanticMatcher(config.keywordTierRules, config.matchThreshold, async () => {
       throw new Error("embeddings call timed out after 3000ms");
     });
-    const { decision } = await route({ turn: turn("hi"), config, api: applier(), semantic, now: () => 0 });
+    const { decision } = await route({ turn: turn("hi"), config, models: lookup(), semantic, now: () => 0 });
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.signals).toContain("semantic_keyword_match_failed (embeddings call timed out after 3000ms)");
@@ -287,7 +283,7 @@ describe("route — semantic keyword matching", () => {
     const { decision } = await route({
       turn: turn("something else entirely"),
       config,
-      api: applier(),
+      models: lookup(),
       semantic,
       now: () => 0,
     });
@@ -297,7 +293,7 @@ describe("route — semantic keyword matching", () => {
 
   it("a literal match is never labelled semantic", async () => {
     const config = buildConfig([{ defaultModel: "a/haiku", tiers: TIERS, keywordTierRules: RULES }]).config;
-    const { decision } = await route({ turn: turn("please do a kubernetes deployment"), config, api: applier(), now: () => 0 });
+    const { decision } = await route({ turn: turn("please do a kubernetes deployment"), config, models: lookup(), now: () => 0 });
     expect(decision.cause).toBe("literal_keyword_match");
     expect(decision.matchedKeyword).toBe("kubernetes deployment");
   });

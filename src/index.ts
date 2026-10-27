@@ -4,15 +4,22 @@
  * Wiring only: the routing decision itself lives in `router.ts`, which has no pi imports
  * so it can be tested without an agent.
  *
- * The seam is the `input` event. It fires after extension commands are dispatched and
- * before skill/template expansion and `before_agent_start`, so it is the last point at
- * which the model for the turn about to run can still be changed.
+ * The seam is a pi virtual model, `autoroute/auto`. Selecting it in `/model` (or with
+ * `--model autoroute/auto`) is what turns routing on; pi then asks this extension for a
+ * physical model before every request. The selection stays `autoroute/auto`, while each
+ * assistant message records the model that actually answered, so nothing here ever calls
+ * `pi.setModel()` to route a prompt. Picking any other model leaves the router alone.
+ *
+ * Only the first request of a prompt is classified. Tool-call continuations, retries,
+ * mid-run steers and follow-ups, and requests outside the agent loop (compaction
+ * summaries) stay on the model already serving the conversation, which keeps prompt
+ * caches and thinking signatures valid.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 import { buildConfig, type RouterConfig, loadConfig } from "./config.ts";
 import { buildAdaptiveRouter, turnFromRun } from "./adaptive/index.ts";
 import { classifyRequestType } from "./adaptive/request-type.ts";
@@ -33,13 +40,90 @@ import {
   renderDecisionEntry,
   statusLine,
 } from "./decision.ts";
-import { extractTurn, stripReminderBlocks, type SimpleMessage } from "./extract.ts";
+import {
+  extractTurn,
+  splitCurrentTurn,
+  stripReminderBlocks,
+  type SimpleMessage,
+  withSkillBlocks,
+} from "./extract.ts";
 import { type CandidateModel, buildInitialConfig, renderInitPreview } from "./init.ts";
 import { detectQuestionReply } from "./question-reply.ts";
-import { type SessionPin, route } from "./router.ts";
-import { isThinkingLevel, isTier, type RouteDecision, type TierTarget } from "./types.ts";
+import {
+  type ModelLookup,
+  type Resolved,
+  candidatesForTier,
+  defaultTarget,
+  isVirtualModel,
+  resolveFirstUsable,
+  resolveModelRef,
+} from "./resolve.ts";
+import { type RouteOutput, type SessionPin, route } from "./router.ts";
+import {
+  THINKING_LEVELS,
+  isThinkingLevel,
+  isTier,
+  type ExtractedTurn,
+  type ModelRef,
+  type RouteDecision,
+  type ThinkingLevel,
+  type Tier,
+  type TierTarget,
+} from "./types.ts";
 
 const STATUS_KEY = "autoroute";
+
+/** The router's place in pi's model catalog: `autoroute/auto`. The provider id is used by
+ *  nothing else, so the model needs no credentials of its own and is always selectable. */
+export const VIRTUAL_PROVIDER = "autoroute";
+export const VIRTUAL_MODEL_ID = "auto";
+export const VIRTUAL_MODEL_REF = `${VIRTUAL_PROVIDER}/${VIRTUAL_MODEL_ID}`;
+
+/**
+ * Router state pi keeps on the session branch. It follows forks and `/tree` navigation and
+ * survives compaction, which an in-memory variable would not.
+ */
+export interface BranchState {
+  /** Tier of the last routed prompt: what a question reply escalates or floors from. */
+  tier: Tier | null;
+  /** Model and thinking level the last prompt was routed to. */
+  model: ModelRef | null;
+  thinkingLevel: ThinkingLevel | null;
+  /** The session-affinity pin, when `sessionAffinity` is on. */
+  pin: SessionPin | null;
+}
+
+type Route = ModelRoute<BranchState>;
+type RouteRequest = ModelRouteRequest<BranchState>;
+type PiModel = Route["model"];
+
+function isRouterModel(model: { provider?: unknown; id?: unknown } | null | undefined): boolean {
+  return model?.provider === VIRTUAL_PROVIDER && model?.id === VIRTUAL_MODEL_ID;
+}
+
+function refOf(model: { provider: string; id: string }): ModelRef {
+  return `${model.provider}/${model.id}`;
+}
+
+function sameState(a: BranchState | undefined, b: BranchState): boolean {
+  return a !== undefined && JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** `provider/model` of the newest assistant message that a physical model answered. */
+function servedModel(messages: readonly unknown[]): ModelRef | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as
+      | { role?: unknown; provider?: unknown; model?: unknown; api?: unknown; stopReason?: unknown }
+      | undefined;
+    if (message?.role !== "assistant") continue;
+    // A failed routing attempt leaves the virtual model on its message.
+    if (isVirtualModel(message) || message.stopReason === "error" || message.stopReason === "aborted") continue;
+    if (typeof message.provider === "string" && typeof message.model === "string") {
+      return `${message.provider}/${message.model}`;
+    }
+  }
+  return null;
+}
 
 /** Convert validated config back to the documented JSON shape before command edits.
  * Writing a complete project layer avoids shallow config merging dropping global nested
@@ -125,30 +209,37 @@ export default function autorouter(pi: ExtensionAPI): void {
   let configWarnings: string[] = [];
   let configErrors: string[] = [];
   let configSources: string[] = [];
+  /** No config file at all, as opposed to one that failed to load. */
+  let configMissing = false;
 
   let state: AutorouteState = {};
-  let pin: SessionPin | null = null;
   let lastDecision: RouteDecision | null = null;
   /** The ask the last decision was made on; what the bandit credits feedback against.
    *  A held turn deliberately leaves this alone: "ok" describes no work, so feedback from
    *  the run it triggers belongs to the request that was already in flight. */
   let lastRoutedAsk: string | null = null;
-  /** The last model the router actually applied. Distinct from `lastDecision.chosenModel`,
-   *  which is null on a held turn — the bandit still has to credit the run to the model
-   *  that served it. */
-  let lastAppliedModel: string | null = null;
   let adaptive: AdaptiveRouter | null = null;
   const adaptiveStorePath = defaultAdaptiveStorePath();
   let semantic: SemanticMatcher | null = null;
   let planModeActive = false;
   /** Model refs for command completion; the completion callback gets no context. */
   let availableRefs: string[] = [];
-  /** True while our own setModel calls are in flight, so their model_select echoes are
-   *  not mistaken for the user picking a model by hand. */
-  let applyingOwnModel = false;
+  /** Set once the current agent run's prompt has been routed, cleared at `agent_end`. Pi
+   *  routes a steer or a follow-up as a user request too; this is what keeps such a
+   *  message on the model the run was routed to rather than reclassifying it. */
+  let routedThisRun = false;
+  /** Set when this run's prompt went through the classifier and left a decision, which is
+   *  what the bandit may learn from. A paused or pinned router chose nothing. */
+  let decidedThisRun = false;
+  /** Whether the prompt that started the run came from another extension
+   *  (`pi.sendUserMessage`) rather than from the user. */
+  let promptFromExtension = false;
+
+  const supportsVirtualModels =
+    typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
   pi.registerFlag("no-autoroute", {
-    description: "Start with automatic model routing disabled",
+    description: "Start with automatic model routing paused (autoroute/auto holds its current model)",
     type: "boolean",
     default: false,
   });
@@ -189,11 +280,24 @@ export default function autorouter(pi: ExtensionAPI): void {
     }
   };
 
+  /**
+   * The conversation a request is routed on, user and assistant messages only.
+   *
+   * Read from the session branch when it has one: there, messages other extensions inject
+   * (`before_agent_start` context, say) are custom entries rather than user messages, so
+   * they cannot pass for the user's ask. The request's own messages are the fallback.
+   */
+  const conversation = (request: RouteRequest, ctx: ExtensionContext): SimpleMessage[] => {
+    const fromBranch = sessionMessages(ctx);
+    if (fromBranch.some((message) => message.role === "user")) return fromBranch;
+    return request.messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({ role: message.role, content: message.content }));
+  };
+
   const restoreState = (ctx: ExtensionContext): void => {
     state = {};
-    pin = null;
     lastDecision = null;
-    lastAppliedModel = null;
     try {
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type !== "custom") continue;
@@ -201,11 +305,10 @@ export default function autorouter(pi: ExtensionAPI): void {
         if (custom.customType === STATE_ENTRY_TYPE && custom.data) {
           state = { ...state, ...(custom.data as AutorouteState) };
         }
-        // Decisions are replayed too, so a session resumed onto an open question still
-        // knows which tier it was on and can escalate from it rather than from nothing.
+        // Decisions are replayed too, so `/autoroute explain` and a question reply in a
+        // session from before router state existed still know the last tier.
         if (custom.customType === DECISION_ENTRY_TYPE && custom.data) {
           lastDecision = custom.data as RouteDecision;
-          if (lastDecision.chosenModel) lastAppliedModel = lastDecision.chosenModel;
         }
       }
     } catch {
@@ -240,6 +343,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     configWarnings = loaded.warnings;
     configErrors = loaded.errors;
     configSources = loaded.sources;
+    configMissing = loaded.missing;
     rebuildAdaptive(ctx);
     rebuildSemantic(ctx);
   };
@@ -259,6 +363,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     }
   };
 
+  /** Why prompts are not being classified, or null when they are. */
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
     if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
@@ -267,22 +372,270 @@ export default function autorouter(pi: ExtensionAPI): void {
     return null;
   };
 
-  pi.on("session_start", async (_event, ctx) => {
-    const loaded = loadConfig(ctx.cwd);
-    config = loaded.config;
-    configWarnings = loaded.warnings;
-    configErrors = loaded.errors;
-    configSources = loaded.sources;
-    restoreState(ctx);
-    rebuildAdaptive(ctx);
-    rebuildSemantic(ctx);
+  /** Physical models only: tiers, pins and overrides cannot name a virtual model. */
+  const physicalModels = (models: readonly unknown[]): CandidateModel[] =>
+    models.filter((model) => !isVirtualModel(model)) as CandidateModel[];
+
+  /** The model serving this session, for `/autoroute pin` without an argument. */
+  const currentServedModel = (ctx: ExtensionContext): ModelRef | null => {
     try {
-      availableRefs = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+      const messages = ctx.sessionManager
+        .getBranch()
+        .flatMap((entry) => (entry.type === "message" ? [(entry as { message?: unknown }).message] : []));
+      const served = servedModel(messages);
+      if (served) return served;
+    } catch {
+      // Fall through to what this process last routed to.
+    }
+    if (lastDecision?.chosenModel) return lastDecision.chosenModel;
+    return ctx.model && !isVirtualModel(ctx.model) ? refOf(ctx.model) : null;
+  };
+
+  /** A model reference a command was given, checked against pi's catalog. */
+  const checkCommandModel = (model: string, ctx: ExtensionContext): string | null => {
+    const ref = splitModelRef(model);
+    const found = ref ? ctx.modelRegistry.find(ref.provider, ref.modelId) : undefined;
+    if (!found) return `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`;
+    if (isVirtualModel(found)) return `autoroute: "${model}" is a virtual model; route to a physical model instead.`;
+    return null;
+  };
+
+  /** Make `autoroute/auto` the session's model. Never persists it as the global default. */
+  const selectRouterModel = async (ctx: ExtensionContext): Promise<boolean> => {
+    if (isRouterModel(ctx.model)) return true;
+    try {
+      const model = ctx.modelRegistry.find(VIRTUAL_PROVIDER, VIRTUAL_MODEL_ID);
+      return model ? await pi.setModel(model) : false;
+    } catch {
+      return false;
+    }
+  };
+
+  // ── Routing ────────────────────────────────────────────────────────────────
+
+  /**
+   * The model already serving this conversation, when pi can still route to it: the one
+   * that failed (for a retry), else the one that answered last, else the one router state
+   * says the last prompt went to.
+   */
+  const servingRoute = (request: RouteRequest, lookup: ModelLookup): Route | null => {
+    const fallbackLevel = request.state?.thinkingLevel ?? request.thinkingLevel;
+    for (const served of [request.failed, request.previous]) {
+      if (!served) continue;
+      const resolved = resolveModelRef(refOf(served.model), lookup);
+      if ("target" in resolved) {
+        return { model: resolved.target as PiModel, thinkingLevel: served.thinkingLevel ?? fallbackLevel };
+      }
+    }
+    const routed = request.state?.model;
+    if (routed) {
+      const resolved = resolveModelRef(routed, lookup);
+      if ("target" in resolved) return { model: resolved.target as PiModel, thinkingLevel: fallbackLevel };
+    }
+    return null;
+  };
+
+  /** No classification, just a usable model: `defaultModel`, then the MEDIUM chain. */
+  const configFallback = (lookup: ModelLookup): Resolved | null => {
+    if (!config) return null;
+    const candidates = [defaultTarget(config), ...candidatesForTier("MEDIUM", config, () => 0)].filter(
+      (target): target is TierTarget => target !== null,
+    );
+    return resolveFirstUsable(candidates, lookup).resolved;
+  };
+
+  const routeRequest = async (request: RouteRequest, ctx: ExtensionContext): Promise<Route> => {
+    const lookup: ModelLookup = ctx.modelRegistry;
+    // A tier entry without a thinking level takes the level selected on autoroute/auto;
+    // pi clamps whatever is returned to what the routed model supports.
+    const toRoute = (target: unknown, level: ThinkingLevel | null | undefined): Route => ({
+      model: target as PiModel,
+      thinkingLevel: (level ?? request.thinkingLevel) as Route["thinkingLevel"],
+    });
+    const hold = (allowConfigFallback: boolean): Route | null => {
+      const serving = servingRoute(request, lookup);
+      if (serving) return serving;
+      const fallback = allowConfigFallback && config?.enabled ? configFallback(lookup) : null;
+      return fallback ? toRoute(fallback.target, fallback.thinkingLevel) : null;
+    };
+    const unroutable = (why: string): Error =>
+      new Error(`autoroute: ${why}. Run /autoroute for details, or pick another model with /model.`);
+
+    // Only a new prompt is classified. Tool-call continuations and retries stay on the
+    // model serving the turn, which keeps prompt caches and thinking signatures valid; a
+    // compaction summary or an extension's own call is not a prompt; and a steer or
+    // follow-up arriving mid-run, or a prompt another extension sent, rides on the model
+    // the run already has, as it always has.
+    const newPrompt = request.reason === "user" && !routedThisRun && !promptFromExtension;
+    if (!newPrompt) {
+      const serving = servingRoute(request, lookup);
+      if (serving) return serving;
+      if (request.reason !== "user") {
+        const fallback = config?.enabled ? configFallback(lookup) : null;
+        if (fallback) return toRoute(fallback.target, fallback.thinkingLevel);
+        throw unroutable("no model to route this request to");
+      }
+      // A user message with nothing to hold onto is routed like a new prompt.
+    }
+    routedThisRun = true;
+
+    if (!config?.enabled) {
+      const held = hold(false);
+      if (held) return held;
+      const why = configMissing
+        ? "no autorouter config (run /autoroute init)"
+        : (configErrors[0] ?? "routing is disabled in autorouter.json");
+      throw unroutable(why);
+    }
+
+    // A one-shot override is an explicit instruction for this prompt, so it is honoured
+    // even when routing is otherwise off or pinned. It is checked before those, and always
+    // cleared afterwards, so "off" still means off from the next prompt onwards.
+    const oneShot = state.nextTarget ?? (state.nextModel ? { model: state.nextModel } : null);
+
+    const paused = pi.getFlag("no-autoroute") === true ? "--no-autoroute" : state.disabled ? "/autoroute off" : null;
+    if (paused && !oneShot) {
+      const held = hold(true);
+      if (held) return held;
+      throw unroutable(`routing is off (${paused}) and there is no model to hold`);
+    }
+
+    if (state.pinnedModel && !oneShot) {
+      const pinned = resolveModelRef(state.pinnedModel, lookup);
+      if ("target" in pinned) return toRoute(pinned.target, null);
+      if (ctx.hasUI) ctx.ui.notify(`autoroute: cannot use the pinned model: ${pinned.problem}`, "error");
+      const held = hold(false);
+      if (held) return held;
+      throw unroutable(`cannot use the pinned model: ${pinned.problem}`);
+    }
+
+    const branchState = request.state;
+    let turn: ExtractedTurn;
+    let result: RouteOutput;
+    try {
+      const { current, prior } = splitCurrentTurn(conversation(request, ctx));
+      const markerPairs = withSkillBlocks(config.reminderMarkers);
+      turn = extractTurn(current, prior, {
+        markerPairs,
+        contextWindowSize: config.classifierContextWindowSize,
+        perTurnChars: config.classifierContextPerTurnChars,
+        includeAssistantTurns: config.classifierContextIncludeAssistantTurns,
+      });
+
+      // Detection reads *this* turn's text, not `turn.currentAsk`: that field falls back to
+      // the newest prior ask when the prompt is reminder-only, and answering a question
+      // with the previous request's text would hold on the wrong grounds.
+      const pendingReply = detectQuestionReply(stripReminderBlocks(current, markerPairs), prior, {
+        enabled: config.questionReply,
+        toolNames: config.questionReplyToolNames,
+        maxChars: config.questionReplyMaxChars,
+      });
+
+      result = await route({
+        turn,
+        config,
+        models: lookup,
+        registry: ctx.modelRegistry as never,
+        planModeActive,
+        pin: branchState?.pin ?? null,
+        oneShot,
+        questionReply: pendingReply
+          ? { toolName: pendingReply.toolName, lastTier: branchState?.tier ?? lastDecision?.tier ?? null }
+          : null,
+        callerSystemPrompt: undefined,
+        adaptive,
+        semantic,
+        ...(request.signal ? { signal: request.signal } : {}),
+      });
+    } catch (err) {
+      // Choosing a model is a routing decision; a failure in it falls back to the model
+      // already serving the session rather than failing the turn, whenever there is one.
+      const message = err instanceof Error ? err.message : String(err);
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `autoroute error: ${message}`);
+      const held = hold(true);
+      if (held) return held;
+      throw unroutable(message);
+    }
+
+    const { decision } = result;
+    lastDecision = decision;
+    if (decision.cause !== "question_reply") lastRoutedAsk = turn.currentAsk;
+    if (result.consumedOneShot) {
+      state.nextTarget = null;
+      state.nextModel = null;
+      persistState();
+      if (ctx.hasUI && !decision.chosenModel) {
+        ctx.ui.notify(`autoroute: ${decision.fellBackBecause ?? "one-shot override failed"}`, "error");
+      }
+    }
+
+    // A held reply goes to the model that asked the question (or, with none, to the config
+    // fallback). A chain with nothing usable in it keeps the model already serving the
+    // session and nothing else: the MEDIUM fallback could promote a request past the tier
+    // it was classified into, which is a bill the user did not ask for.
+    const routed: Route | null = result.target
+      ? toRoute(result.target, decision.thinkingLevel)
+      : hold(decision.cause === "question_reply");
+
+    pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, decision);
+    decidedThisRun = true;
+    logDecisionToConsole(decision, ctx);
+    const heldModel = !result.target && routed ? refOf(routed.model) : null;
+    const failureNotice = !decision.chosenModel ? routingFailureNotice(decision, heldModel) : null;
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(STATUS_KEY, statusLine(decision));
+      // The full candidate failures remain in the decision entry and `/autoroute explain`;
+      // keep the toast actionable.
+      if (failureNotice) ctx.ui.notify(failureNotice, "error");
+      const classifierNotice = classifierFallbackNotice(decision);
+      if (classifierNotice) ctx.ui.notify(classifierNotice, "warning");
+    }
+    if (!routed) throw failureNotice ? new Error(failureNotice) : unroutable("no configured model is usable");
+
+    const nextState: BranchState = {
+      tier: decision.tier,
+      model: decision.chosenModel ?? refOf(routed.model),
+      thinkingLevel: routed.thinkingLevel as ThinkingLevel,
+      pin: result.pinToWrite ?? branchState?.pin ?? null,
+    };
+    // Returning the current state object keeps it; a new one is stored even when equal.
+    return { ...routed, state: sameState(branchState, nextState) ? branchState : nextState };
+  };
+
+  if (supportsVirtualModels) {
+    pi.registerVirtualModel<BranchState>({
+      provider: VIRTUAL_PROVIDER,
+      id: VIRTUAL_MODEL_ID,
+      name: "Auto (LiteLLM router)",
+      // The selected level is the default for tier entries that do not set their own.
+      thinkingLevels: THINKING_LEVELS,
+      route: routeRequest,
+    });
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────────
+
+  pi.on("session_start", async (_event, ctx) => {
+    routedThisRun = false;
+    decidedThisRun = false;
+    promptFromExtension = false;
+    reloadConfig(ctx);
+    restoreState(ctx);
+    try {
+      availableRefs = physicalModels(ctx.modelRegistry.getAvailable()).map((m) => `${m.provider}/${m.id}`);
     } catch {
       availableRefs = [];
     }
 
-    if (configErrors.length > 0 && ctx.hasUI) {
+    if (!supportsVirtualModels && ctx.hasUI) {
+      ctx.ui.notify("autoroute needs a pi version with virtual models (pi.registerVirtualModel); please update pi", "error");
+      return;
+    }
+    if (!ctx.hasUI) return;
+    if (configMissing) {
+      // Nothing to report until the router is actually selected without a config.
+      if (isRouterModel(ctx.model)) ctx.ui.notify(`autoroute: no config yet; run /autoroute init`, "warning");
+    } else if (configErrors.length > 0) {
       // Loud, but not fatal: a broken router config must not stop the agent from starting.
       ctx.ui.notify(`autoroute disabled: ${configErrors[0]}`, "error");
     }
@@ -303,117 +656,18 @@ export default function autorouter(pi: ExtensionAPI): void {
     );
   });
 
-  // A model the user chose by hand outranks the router until they clear it.
-  pi.on("model_select", async (event) => {
-    if (event.source !== "set") return;
-    // Our own pi.setModel() also raises model_select. Mistaking that echo for a hand pick
-    // would have the router disable itself the moment it made its first decision, so the
-    // echo is suppressed by a flag held across the routing call rather than by comparing
-    // against lastDecision — which is not assigned until route() has already returned, and
-    // so is still the *previous* turn's model while setModel is running.
-    if (applyingOwnModel) return;
-    const model = event.model;
-    if (!model) return;
-    const ref = `${model.provider}/${model.id}`;
-    // Belt and braces for an echo delivered after route() returned, when lastDecision is
-    // current.
-    if (lastDecision?.chosenModel === ref) return;
-    state.pinnedModel = ref;
-    persistState();
+  // Who sent the prompt that is about to start a run. Pi routes every user message the
+  // same way, so this is the only place an extension's `sendUserMessage` can be told apart
+  // from the user typing. Steers and follow-ups never start a run, so they are not counted.
+  pi.on("input", async (event) => {
+    if (!event.streamingBehavior) promptFromExtension = event.source === "extension";
+    return { action: "continue" as const };
   });
 
-  pi.on("input", async (event, ctx) => {
-    // Messages this extension injected are not user asks; routing them would classify our
-    // own text.
-    if (event.source === "extension") return { action: "continue" as const };
-    // Mid-stream steers and queued follow-ups arrive while a run is in flight, where
-    // switching models would break the conversation's provider-specific message shapes.
-    if (event.streamingBehavior) return { action: "continue" as const };
-
-    // A one-shot override is an explicit instruction for this prompt, so it is honoured
-    // even when routing is otherwise off or pinned. It is checked before those, and always
-    // cleared afterwards, so "off" still means off from the next prompt onwards.
-    const oneShot = state.nextTarget ?? (state.nextModel ? { model: state.nextModel } : null);
-
-    const disabled = routingDisabled();
-    if ((disabled && !oneShot) || !config) return { action: "continue" as const };
-
-    try {
-      const messages = sessionMessages(ctx);
-      const turn = extractTurn(event.text, messages, {
-        markerPairs: config.reminderMarkers,
-        contextWindowSize: config.classifierContextWindowSize,
-        perTurnChars: config.classifierContextPerTurnChars,
-        includeAssistantTurns: config.classifierContextIncludeAssistantTurns,
-      });
-
-      // Detection reads *this* turn's text, not `turn.currentAsk`: that field falls back to
-      // the newest prior ask when the prompt is reminder-only, and answering a question
-      // with the previous request's text would hold on the wrong grounds.
-      const pendingReply = detectQuestionReply(
-        stripReminderBlocks(event.text, config.reminderMarkers),
-        messages,
-        {
-          enabled: config.questionReply,
-          toolNames: config.questionReplyToolNames,
-          maxChars: config.questionReplyMaxChars,
-        },
-      );
-
-      applyingOwnModel = true;
-      const result = await route({
-        turn,
-        config,
-        api: {
-          find: (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
-          setModel: (model) => pi.setModel(model),
-          setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
-        },
-        registry: ctx.modelRegistry as never,
-        planModeActive,
-        pin,
-        oneShot,
-        questionReply: pendingReply ? { toolName: pendingReply.toolName, lastTier: lastDecision?.tier ?? null } : null,
-        callerSystemPrompt: undefined,
-        adaptive,
-        semantic,
-      });
-
-      applyingOwnModel = false;
-      lastDecision = result.decision;
-      if (result.decision.chosenModel) lastAppliedModel = result.decision.chosenModel;
-      if (result.decision.cause !== "question_reply") lastRoutedAsk = turn.currentAsk;
-      if (result.pinToWrite) pin = result.pinToWrite;
-      if (result.consumedOneShot) {
-        state.nextTarget = null;
-        state.nextModel = null;
-        persistState();
-        if (ctx.hasUI && !result.decision.chosenModel) {
-          ctx.ui.notify(`autoroute: ${result.decision.fellBackBecause ?? "one-shot override failed"}`, "error");
-        }
-      }
-
-      pi.appendEntry<RouteDecision>(DECISION_ENTRY_TYPE, result.decision);
-      logDecisionToConsole(result.decision, ctx);
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(STATUS_KEY, statusLine(result.decision));
-        // A failed model application otherwise leaves pi on its existing model with no
-        // visible indication why routing did not take effect. The full candidate failures
-        // remain in the decision entry and `/autoroute explain`; keep the toast actionable.
-        const failureNotice = !result.decision.chosenModel ? routingFailureNotice(result.decision) : null;
-        if (failureNotice) ctx.ui.notify(failureNotice, "error");
-        const classifierNotice = classifierFallbackNotice(result.decision);
-        if (classifierNotice) ctx.ui.notify(classifierNotice, "warning");
-      }
-    } catch (err) {
-      // Choosing a model is a routing decision; no failure in it may fail the user's turn.
-      applyingOwnModel = false;
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(STATUS_KEY, `autoroute error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    return { action: "continue" as const };
+  // The footer status describes the router's last decision; it means nothing once another
+  // model is selected.
+  pi.on("model_select", async (event, ctx) => {
+    if (ctx.hasUI && !isRouterModel(event.model)) ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 
   // The bandit learns from what happened after its pick: a rephrase or a "forget it" in
@@ -421,9 +675,15 @@ export default function autorouter(pi: ExtensionAPI): void {
   // loop or a near-duplicate reply counts against the model that produced this one.
   // Upstream does this from the proxy's post-call hook; `agent_end` is pi's equivalent.
   pi.on("agent_end", async (event, ctx) => {
-    if (!config?.adaptive || !adaptive) return;
-    // A held turn applied no model, so the run is credited to the one still serving it.
-    const model = lastDecision?.chosenModel ?? lastAppliedModel;
+    const decided = decidedThisRun;
+    routedThisRun = false;
+    decidedThisRun = false;
+    promptFromExtension = false;
+    // Only runs the router made a decision for teach it anything.
+    if (!decided || !config?.adaptive || !adaptive) return;
+    // Credit the model that actually answered, which on a held turn is the one that was
+    // already serving the session.
+    const model = servedModel(event.messages as readonly unknown[]) ?? lastDecision?.chosenModel;
     if (!model) return;
     try {
       const turn = turnFromRun(lastRoutedAsk, event.messages as never);
@@ -433,6 +693,8 @@ export default function autorouter(pi: ExtensionAPI): void {
       // Learning is a bonus on top of routing; a failure here must not surface as one.
     }
   });
+
+  // ── Commands ───────────────────────────────────────────────────────────────
 
   /**
    * Write a starting config built from the models pi can reach.
@@ -446,12 +708,10 @@ export default function autorouter(pi: ExtensionAPI): void {
     const provider = rest.find((token) => !["project", "global", "llm", "heuristic"].includes(token));
 
     // Session scoping (`--models` / `enabledModels`) is the set the user actually intends
-    // to use, so it wins over the full catalogue when it is set.
-    const scoped = ctx.scopedModels ?? [];
-    const source: CandidateModel[] =
-      scoped.length > 0
-        ? scoped.map((entry) => entry.model as unknown as CandidateModel)
-        : (ctx.modelRegistry.getAvailable() as unknown as CandidateModel[]);
+    // to use, so it wins over the full catalogue when it is set. Virtual models, this one
+    // included, cannot be routed to and are left out either way.
+    const scoped = physicalModels((ctx.scopedModels ?? []).map((entry) => entry.model));
+    const source: CandidateModel[] = scoped.length > 0 ? scoped : physicalModels(ctx.modelRegistry.getAvailable());
 
     let result;
     try {
@@ -502,20 +762,19 @@ export default function autorouter(pi: ExtensionAPI): void {
       return;
     }
 
-    // Load it straight away so the session routes without a restart.
-    const loaded = loadConfig(ctx.cwd);
-    config = loaded.config;
-    configWarnings = loaded.warnings;
-    configErrors = loaded.errors;
-    configSources = loaded.sources;
-    rebuildAdaptive(ctx);
-    rebuildSemantic(ctx);
-
-    ctx.ui.notify(`${preview}\n\n  written. routing is ${config.enabled ? "active" : "still disabled"}.`, "info");
+    // Load it straight away and select the router, so the session routes without a restart.
+    reloadConfig(ctx);
+    const selected = config?.enabled ? await selectRouterModel(ctx) : false;
+    const outcome = !config?.enabled
+      ? "routing is still disabled"
+      : selected
+        ? `routing is active on ${VIRTUAL_MODEL_REF}`
+        : `select ${VIRTUAL_MODEL_REF} in /model to start routing`;
+    ctx.ui.notify(`${preview}\n\n  written. ${outcome}.`, "info");
   };
 
   pi.registerCommand("autoroute", {
-    description: "Show or control automatic model routing",
+    description: `Show or control automatic model routing (select ${VIRTUAL_MODEL_REF} to route)`,
     getArgumentCompletions: (prefix: string) => {
       // `next` and `pin` both take a model, so complete against the catalogue once the
       // verb is typed. Cached at session_start, since this callback gets no context.
@@ -577,9 +836,9 @@ export default function autorouter(pi: ExtensionAPI): void {
             ctx.ui.notify("autoroute: thinking level must be one of off, minimal, low, medium, high, xhigh, max", "error");
             return;
           }
-          const ref = splitModelRef(model);
-          if (!ref || !ctx.modelRegistry.find(ref.provider, ref.modelId)) {
-            ctx.ui.notify(`autoroute: "${model}" is not a model pi knows.`, "error");
+          const problem = checkCommandModel(model, ctx);
+          if (problem) {
+            ctx.ui.notify(problem, "error");
             return;
           }
           const updated = configToJson(config ?? loadConfig(ctx.cwd).config);
@@ -609,43 +868,60 @@ export default function autorouter(pi: ExtensionAPI): void {
             ctx.ui.notify("usage: /autoroute next <provider/model> [thinking-level]", "info");
             return;
           }
-          const ref = splitModelRef(model);
           // Validate now rather than at the next prompt: a typo should fail while the user
           // is still looking at the command, not silently route the prompt they cared about.
-          if (!ref || !ctx.modelRegistry.find(ref.provider, ref.modelId)) {
-            ctx.ui.notify(
-              `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`,
-              "error",
-            );
+          const problem = checkCommandModel(model, ctx);
+          if (problem) {
+            ctx.ui.notify(problem, "error");
             return;
           }
           state.nextTarget = thinking ? { model, thinkingLevel: thinking } : { model };
           persistState();
-          ctx.ui.notify(`autoroute: next prompt only → ${model}${thinking ? ` (${thinking})` : ""}`, "info");
+          const hint = isRouterModel(ctx.model) ? "" : ` (applies once ${VIRTUAL_MODEL_REF} is selected)`;
+          ctx.ui.notify(`autoroute: next prompt only → ${model}${thinking ? ` (${thinking})` : ""}${hint}`, "info");
           return;
         }
 
-        case "on":
+        case "on": {
           state.disabled = false;
           state.pinnedModel = null;
           state.nextTarget = null;
           state.nextModel = null;
           persistState();
-          ctx.ui.notify("autoroute: on", "info");
+          const selected = await selectRouterModel(ctx);
+          ctx.ui.notify(
+            selected
+              ? `autoroute: on (${VIRTUAL_MODEL_REF})`
+              : `autoroute: on, but ${VIRTUAL_MODEL_REF} could not be selected; pick it in /model`,
+            selected ? "info" : "error",
+          );
           return;
+        }
 
         case "off":
           state.disabled = true;
           persistState();
           ctx.ui.setStatus(STATUS_KEY, undefined);
-          ctx.ui.notify("autoroute: off for this session", "info");
+          ctx.ui.notify(
+            `autoroute: off for this session; ${VIRTUAL_MODEL_REF} keeps the model it is on. Pick another model with /model to leave the router.`,
+            "info",
+          );
           return;
 
         case "pin": {
-          const target = rest.join(" ") || ctx.model ? `${ctx.model?.provider}/${ctx.model?.id}` : null;
-          state.pinnedModel = rest.join(" ") || target;
+          const model = rest.join(" ") || currentServedModel(ctx);
+          if (!model) {
+            ctx.ui.notify("usage: /autoroute pin <provider/model>", "info");
+            return;
+          }
+          const problem = checkCommandModel(model, ctx);
+          if (problem) {
+            ctx.ui.notify(problem, "error");
+            return;
+          }
+          state.pinnedModel = model;
           persistState();
-          ctx.ui.notify(`autoroute: pinned to ${state.pinnedModel}`, "info");
+          ctx.ui.notify(`autoroute: pinned to ${model}`, "info");
           return;
         }
 
@@ -666,7 +942,7 @@ export default function autorouter(pi: ExtensionAPI): void {
             config && lastDecision.tier
               ? classifyHeuristic(
                   extractTurn("", sessionMessages(ctx), {
-                    markerPairs: config.reminderMarkers,
+                    markerPairs: withSkillBlocks(config.reminderMarkers),
                     contextWindowSize: 0,
                     perTurnChars: config.classifierContextPerTurnChars,
                     includeAssistantTurns: false,
@@ -715,6 +991,11 @@ export default function autorouter(pi: ExtensionAPI): void {
           const lines: string[] = [];
           const why = routingDisabled();
           lines.push(`status:   ${why ? `disabled (${why})` : "on"}`);
+          lines.push(
+            `model:    ${VIRTUAL_MODEL_REF} ${
+              isRouterModel(ctx.model) ? "(selected)" : "(not selected: /autoroute on, or pick it in /model)"
+            }`,
+          );
           if (config) {
             lines.push(
               `classifier: ${config.classifierType}${

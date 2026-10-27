@@ -151,6 +151,8 @@ export interface LoadedConfig {
   errors: string[];
   /** Files that contributed, for `/autoroute`. */
   sources: string[];
+  /** True when there is no config file at all (as opposed to one that failed to load). */
+  missing: boolean;
 }
 
 const EMPTY_TIERS: Record<Tier, TierTarget[]> = {
@@ -726,6 +728,7 @@ export function loadConfig(cwd: string, home: string = homedir()): LoadedConfig 
   const projectLayer = readJsonIfPresent(projectPath, errors);
   if (projectLayer.present) sources.push(projectPath);
 
+  const missing = sources.length === 0 && errors.length === 0;
   const built = buildConfig([globalLayer.value, projectLayer.value]);
   const allErrors = [...errors, ...built.errors];
   if (allErrors.length > 0) built.config.enabled = false;
@@ -736,5 +739,5 @@ export function loadConfig(cwd: string, home: string = homedir()): LoadedConfig 
     built.warnings.push(`no autorouter config found (looked in ${globalPath} and ${projectPath})`);
   }
 
-  return { config: built.config, warnings: built.warnings, errors: allErrors, sources };
+  return { config: built.config, warnings: built.warnings, errors: allErrors, sources, missing };
 }

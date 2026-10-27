@@ -21,7 +21,7 @@ import {
   toolCallSignature,
 } from "../src/adaptive/signals.ts";
 import { buildConfig } from "../src/config.ts";
-import type { ModelApplier } from "../src/resolve.ts";
+import type { ModelLookup } from "../src/resolve.ts";
 import { route } from "../src/router.ts";
 import type { ExtractedTurn, RequestType } from "../src/types.ts";
 
@@ -50,18 +50,9 @@ function turn(currentAsk: string | null, extra: Partial<ExtractedTurn> = {}): Ex
   return { currentAsk, priorTurns: [], conversationContinuing: false, cumulativeTokens: 0, ...extra };
 }
 
-function applier(): ModelApplier & { applied: string[] } {
-  const applied: string[] = [];
-  return {
-    applied,
-    find: (provider, modelId) => ({ provider, id: modelId }),
-    setModel: async (model) => {
-      const m = model as unknown as { provider: string; id: string };
-      applied.push(`${m.provider}/${m.id}`);
-      return true;
-    },
-    setThinkingLevel: () => {},
-  } as ModelApplier & { applied: string[] };
+/** A model lookup where every model exists and has credentials. */
+function lookup(): ModelLookup {
+  return { find: (provider, modelId) => ({ provider, id: modelId }), hasConfiguredAuth: () => true };
 }
 
 /** Mirrors upstream's `hybrid_config` fixture: cheap lives in the low tiers, premium in the high. */
@@ -434,8 +425,8 @@ describe("route — adaptive", () => {
     const adaptive = buildAdaptiveRouter(config, { registry: costRegistry(), rng: seeded(11) })!;
     pin(adaptive, "general", "a/cheap", 0.05);
     pin(adaptive, "general", "a/premium", 0.95);
-    const api = applier();
-    const { decision } = await route({ turn: turn("hi"), config, api, adaptive, now: () => 0 });
+    const api = lookup();
+    const { decision } = await route({ turn: turn("hi"), config, models: api, adaptive, now: () => 0 });
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.chosenModel).toBe("a/premium");
@@ -448,9 +439,9 @@ describe("route — adaptive", () => {
     const adaptive = buildAdaptiveRouter(config, { registry: costRegistry(), rng: seeded(11) })!;
     pin(adaptive, "general", "a/cheap", 0.05);
     pin(adaptive, "general", "a/premium", 0.95);
-    const api = applier();
-    api.setModel = async (model) => (model as unknown as { id: string }).id !== "premium";
-    const { decision } = await route({ turn: turn("hi"), config, api, adaptive, now: () => 0 });
+    const api = lookup();
+    api.hasConfiguredAuth = (model: never) => (model as { id: string }).id !== "premium";
+    const { decision } = await route({ turn: turn("hi"), config, models: api, adaptive, now: () => 0 });
     expect(decision.adaptive?.chosenModel).toBe("a/premium");
     expect(decision.chosenModel).toBe("a/cheap");
     expect(decision.fellBackBecause).toMatch(/premium/);
@@ -462,15 +453,15 @@ describe("route — adaptive", () => {
       sessionAffinity: true,
     });
     const adaptive = buildAdaptiveRouter(config, { registry: costRegistry(), rng: seeded(11) })!;
-    const api = applier();
-    const keyword = await route({ turn: turn("run the migration"), config, api, adaptive, now: () => 0 });
+    const api = lookup();
+    const keyword = await route({ turn: turn("run the migration"), config, models: api, adaptive, now: () => 0 });
     expect(keyword.decision.cause).toBe("literal_keyword_match");
     expect(keyword.decision.adaptive).toBeUndefined();
 
     const pinned = await route({
       turn: turn("hi"),
       config,
-      api,
+      models: api,
       adaptive,
       now: () => 0,
       pin: { model: "a/premium", tier: "COMPLEX", expiresAt: 10 },
@@ -484,11 +475,11 @@ describe("route — adaptive", () => {
     const adaptive = buildAdaptiveRouter(config, { registry: costRegistry(), rng: seeded(11) })!;
     pin(adaptive, "general", "a/cheap", 0.95);
     pin(adaptive, "general", "a/premium", 0.05);
-    const api = applier();
+    const api = lookup();
     const { decision } = await route({
       turn: turn("think step by step and analyze this tradeoff: weigh the options for our schema"),
       config,
-      api,
+      models: api,
       adaptive,
       now: () => 0,
       planModeActive: true,
@@ -501,8 +492,8 @@ describe("route — adaptive", () => {
 
   it("routes without the bandit when none is supplied", async () => {
     const config = hybridConfig();
-    const api = applier();
-    const { decision } = await route({ turn: turn("hi"), config, api, now: () => 0 });
+    const api = lookup();
+    const { decision } = await route({ turn: turn("hi"), config, models: api, now: () => 0 });
     expect(decision.chosenModel).toBe("a/cheap");
     expect(decision.adaptive).toBeUndefined();
   });

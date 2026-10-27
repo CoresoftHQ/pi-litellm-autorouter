@@ -11,7 +11,7 @@ import { buildConfig } from "../src/config.ts";
 import { detectQuestionReply, looksLikeAnswer, pendingQuestion } from "../src/question-reply.ts";
 import { route } from "../src/router.ts";
 import type { ExtractedTurn } from "../src/types.ts";
-import type { ModelApplier } from "../src/resolve.ts";
+import type { ModelLookup } from "../src/resolve.ts";
 
 const TIERS = {
   SIMPLE: "anthropic/haiku",
@@ -30,18 +30,9 @@ function turn(currentAsk: string | null, extra: Partial<ExtractedTurn> = {}): Ex
   return { currentAsk, priorTurns: [], conversationContinuing: true, cumulativeTokens: 0, ...extra };
 }
 
-function applier(): ModelApplier & { applied: string[] } {
-  const applied: string[] = [];
-  return {
-    applied,
-    find: (provider, modelId) => ({ provider, id: modelId }),
-    setModel: async (model) => {
-      const m = model as unknown as { provider: string; id: string };
-      applied.push(`${m.provider}/${m.id}`);
-      return true;
-    },
-    setThinkingLevel: () => {},
-  } as ModelApplier & { applied: string[] };
+/** A model lookup where every model exists and has credentials. */
+function lookup(): ModelLookup {
+  return { find: (provider, modelId) => ({ provider, id: modelId }), hasConfiguredAuth: () => true };
 }
 
 const now = () => 1_000_000;
@@ -181,11 +172,11 @@ describe("detectQuestionReply", () => {
 describe("route — question reply", () => {
   const signal = { toolName: "ask_user_question", lastTier: "COMPLEX" as const };
 
-  it("applies no model at all", async () => {
-    const api = applier();
-    const { decision } = await route({ turn: turn("ok"), config: config(), api, questionReply: signal, now });
+  it("chooses no model at all", async () => {
+    const api = lookup();
+    const { decision, target } = await route({ turn: turn("ok"), config: config(), models: api, questionReply: signal, now });
 
-    expect(api.applied).toEqual([]);
+    expect(target).toBeNull();
     expect(decision.cause).toBe("question_reply");
     expect(decision.chosenModel).toBeNull();
     expect(decision.tier).toBe("COMPLEX");
@@ -194,59 +185,59 @@ describe("route — question reply", () => {
 
   it("would otherwise have dropped the session to SIMPLE", async () => {
     // The control: same turn, no signal. This is the regression the hold exists to stop.
-    const api = applier();
-    const { decision } = await route({ turn: turn("ok"), config: config(), api, now });
+    const api = lookup();
+    const { decision, target } = await route({ turn: turn("ok"), config: config(), models: api, now });
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.chosenModel).toBe("anthropic/haiku");
   });
 
   it("holds even when the last tier is unknown", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok"),
       config: config(),
-      api,
+      models: api,
       questionReply: { toolName: "ask_user_question", lastTier: null },
       now,
     });
-    expect(api.applied).toEqual([]);
+    expect(target).toBeNull();
     expect(decision.cause).toBe("question_reply");
   });
 
   it("still escalates on an escalation keyword, from the tier the session was on", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok PI ESCALATE"),
       config: config(),
-      api,
+      models: api,
       questionReply: signal,
       now,
     });
     expect(decision.cause).toBe("question_reply_escalation");
     expect(decision.escalated).toBe(true);
     expect(decision.tier).toBe("REASONING");
-    expect(api.applied).toEqual(["anthropic/opus"]);
+    expect(target).toEqual({ provider: "anthropic", id: "opus" });
   });
 
   it("holds rather than escalating from nothing when the last tier is unknown", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok PI ESCALATE"),
       config: config(),
-      api,
+      models: api,
       questionReply: { toolName: "ask_user_question", lastTier: null },
       now,
     });
     expect(decision.cause).toBe("question_reply");
-    expect(api.applied).toEqual([]);
+    expect(target).toBeNull();
   });
 
   it("honours a plan-mode floor that would raise the held tier", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok"),
       config: config({ planMode: { minTier: "REASONING" } }),
-      api,
+      models: api,
       planModeActive: true,
       questionReply: { toolName: "ask_user_question", lastTier: "SIMPLE" },
       now,
@@ -256,46 +247,46 @@ describe("route — question reply", () => {
   });
 
   it("does not let a plan-mode floor lower the held tier", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok"),
       config: config({ planMode: { minTier: "MEDIUM" } }),
-      api,
+      models: api,
       planModeActive: true,
       questionReply: signal,
       now,
     });
     expect(decision.cause).toBe("question_reply");
-    expect(api.applied).toEqual([]);
+    expect(target).toBeNull();
   });
 
   it("is outranked by a one-shot override", async () => {
-    const api = applier();
-    const { decision, consumedOneShot } = await route({
+    const api = lookup();
+    const { decision, target, consumedOneShot } = await route({
       turn: turn("ok"),
       config: config(),
-      api,
+      models: api,
       oneShot: "anthropic/opus",
       questionReply: signal,
       now,
     });
     expect(consumedOneShot).toBe(true);
     expect(decision.cause).toBe("one_shot_override");
-    expect(api.applied).toEqual(["anthropic/opus"]);
+    expect(target).toEqual({ provider: "anthropic", id: "opus" });
   });
 
   it("outranks a session-affinity pin", async () => {
-    const api = applier();
-    const { decision } = await route({
+    const api = lookup();
+    const { decision, target } = await route({
       turn: turn("ok"),
       config: config({ sessionAffinity: true }),
-      api,
+      models: api,
       pin: { model: "anthropic/sonnet", tier: "MEDIUM", expiresAt: now() + 60_000 },
       questionReply: signal,
       now,
     });
     expect(decision.cause).toBe("question_reply");
-    expect(api.applied).toEqual([]);
+    expect(target).toBeNull();
   });
 });
 

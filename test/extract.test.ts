@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_REMINDER_MARKERS } from "../src/defaults.ts";
-import { extractTurn, newestTurnAsk, stripReminderBlocks } from "../src/extract.ts";
+import {
+  SKILL_BLOCK_MARKERS,
+  extractTurn,
+  newestTurnAsk,
+  splitCurrentTurn,
+  stripReminderBlocks,
+  withSkillBlocks,
+} from "../src/extract.ts";
 
 const MARKERS = DEFAULT_REMINDER_MARKERS;
 
@@ -154,5 +161,45 @@ describe("extractTurn", () => {
   it("sends no context at all when the window is 0", () => {
     const messages = [{ role: "user", content: "one" }];
     expect(extractTurn("two", messages, { ...options, contextWindowSize: 0 }).priorTurns).toHaveLength(0);
+  });
+});
+
+describe("splitCurrentTurn", () => {
+  it("takes the user messages after the newest assistant message as the current ask", () => {
+    const messages = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+    ];
+    const { current, prior } = splitCurrentTurn(messages);
+    expect(current).toBe("second");
+    expect(prior).toEqual(messages.slice(0, 2));
+  });
+
+  it("joins several trailing user messages", () => {
+    const { current, prior } = splitCurrentTurn([
+      { role: "user", content: "one" },
+      { role: "user", content: "two" },
+    ]);
+    expect(current).toBe("one\ntwo");
+    expect(prior).toEqual([]);
+  });
+
+  it("has no current ask when the assistant spoke last", () => {
+    expect(splitCurrentTurn([{ role: "assistant", content: "hi" }]).current).toBe("");
+  });
+});
+
+describe("withSkillBlocks", () => {
+  const skill = '<skill name="review" location="/s/SKILL.md">\nthink step by step\n</skill>\n\nfix the typo';
+
+  it("strips pi's expanded skill, leaving the user's arguments", () => {
+    expect(stripReminderBlocks(skill, withSkillBlocks(MARKERS))).toBe("fix the typo");
+  });
+
+  it("keeps the configured markers and does not add the skill pair twice", () => {
+    const pairs = withSkillBlocks(MARKERS);
+    expect(pairs).toEqual([...MARKERS, SKILL_BLOCK_MARKERS]);
+    expect(withSkillBlocks(pairs)).toEqual(pairs);
   });
 });

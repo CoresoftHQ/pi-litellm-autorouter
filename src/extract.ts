@@ -15,6 +15,22 @@ import type { ReminderMarkerPair } from "./config.ts";
 import { DEFAULT_REMINDER_MARKERS } from "./defaults.ts";
 import type { ExtractedTurn } from "./types.ts";
 
+/**
+ * pi's own expansion of `/skill:name args`: the skill file wrapped in a `<skill>` block,
+ * then the arguments. The block is instructions pi loaded, not something the user typed,
+ * so it is stripped like any other harness plumbing, whatever `reminderMarkers` says.
+ */
+export const SKILL_BLOCK_MARKERS: ReminderMarkerPair = { open: '<skill name="', close: "</skill>" };
+
+/** `markerPairs` plus pi's skill block. */
+export function withSkillBlocks(markerPairs: readonly ReminderMarkerPair[]): ReminderMarkerPair[] {
+  const hasSkill = markerPairs.some(
+    (pair) =>
+      pair.open.toLowerCase() === SKILL_BLOCK_MARKERS.open && pair.close.toLowerCase() === SKILL_BLOCK_MARKERS.close,
+  );
+  return hasSkill ? [...markerPairs] : [...markerPairs, SKILL_BLOCK_MARKERS];
+}
+
 /** ~4 characters per token, matching upstream's estimator. */
 export function estimateTokens(text: string): number {
   return Math.floor(text.length / 4);
@@ -131,6 +147,24 @@ export function newestTurnAsk(
   return null;
 }
 
+/**
+ * Split a conversation into the turn being routed and what came before it.
+ *
+ * The virtual model routes after the prompt has landed in the session, so the current ask
+ * is the run of user messages after the newest assistant message: usually exactly one, the
+ * prompt. Everything before it is history, in the shape `extractTurn` takes.
+ */
+export function splitCurrentTurn(messages: readonly SimpleMessage[]): { current: string; prior: SimpleMessage[] } {
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]?.role === "user") start--;
+  const current = messages
+    .slice(start)
+    .map((message) => messageText(message.content))
+    .filter(Boolean)
+    .join("\n");
+  return { current, prior: messages.slice(0, start) };
+}
+
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
@@ -138,9 +172,9 @@ function truncate(text: string, limit: number): string {
 /**
  * Build the classifiable view of a turn.
  *
- * `currentText` is the prompt being submitted right now — pi hands it to us on the
- * `input` event before it lands in the session, so it is passed separately rather than
- * read back out of `messages`.
+ * `currentText` is the prompt being routed and `messages` the conversation before it (see
+ * `splitCurrentTurn`). They are passed separately so the current ask can be stripped and
+ * judged on its own while history only feeds the classifier's context window.
  */
 export function extractTurn(
   currentText: string,

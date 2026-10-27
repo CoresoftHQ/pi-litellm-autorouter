@@ -114,12 +114,12 @@ export interface RouteDecision {
   escalationKeyword: string | null;
   escalated: boolean;
   planFloored: boolean;
-  /** Model actually applied, as `provider/modelId`. Null when routing left the
-   *  session's model untouched. */
+  /** Model the request was routed to, as `provider/modelId`. Null when routing kept the
+   *  model the session was already on (a held turn, or nothing in the chain was usable). */
   chosenModel: ModelRef | null;
   thinkingLevel: ThinkingLevel | null;
   latencyMs: number;
-  /** Set when the intended model could not be applied and a fallback was used. */
+  /** Set when the intended model could not be used and a fallback was taken. */
   fellBackBecause?: string;
   /** How the adaptive bandit chose, when `adaptive` is on and a tier was routed. Mirrors
    *  the `adaptive_router_decision` metadata LiteLLM stamps on the request. */
