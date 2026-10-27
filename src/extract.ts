@@ -195,18 +195,41 @@ export function extractTurn(
 
   const priorTurns: { role: "user" | "assistant"; text: string }[] = [];
   if (contextWindowSize > 0) {
-    const roles = includeAssistantTurns ? ["user", "assistant"] : ["user"];
-    for (let i = messages.length - 1; i >= 0 && priorTurns.length < contextWindowSize; i--) {
+    // Quoted turns by their position in `messages`, so they can be put back in order.
+    const picked: { index: number; role: "user" | "assistant"; text: string }[] = [];
+
+    // The window holds the user's own prior asks: they say what the work in progress is.
+    let userTurns = 0;
+    for (let i = messages.length - 1; i >= 0 && userTurns < contextWindowSize; i--) {
       const msg = messages[i];
-      if (!msg || !roles.includes(msg.role)) continue;
+      if (msg?.role !== "user") continue;
       const text = humanText(msg.content, markerPairs);
       if (!text) continue;
       // Drop a prior turn that just repeats the current ask ("continue", "try again"):
       // quoting it back adds nothing the classifier can use.
       if (text === currentAsk) continue;
-      priorTurns.push({ role: msg.role as "user" | "assistant", text: truncate(text, perTurnChars) });
+      picked.push({ index: i, role: "user", text: truncate(text, perTurnChars) });
+      userTurns++;
     }
-    priorTurns.reverse(); // oldest first, as the classifier payload quotes them
+
+    // At most one assistant turn, and outside the window: the latest text reply, which is
+    // what a "yes" or "go ahead" answers. Quoting more would mostly quote an agent's running
+    // narration ("let me check the config"), and letting it take window slots pushed the
+    // user's own asks out, which is the context that matters.
+    if (includeAssistantTurns) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg?.role !== "assistant") continue;
+        const text = humanText(msg.content, markerPairs);
+        if (!text) continue; // tool calls only: not a reply
+        if (text !== currentAsk) picked.push({ index: i, role: "assistant", text: truncate(text, perTurnChars) });
+        break;
+      }
+    }
+
+    // Oldest first, as the classifier payload quotes them.
+    picked.sort((a, b) => a.index - b.index);
+    for (const { role, text } of picked) priorTurns.push({ role, text });
   }
 
   // Gated on whether prior conversation exists at all, not on whether any of it survived

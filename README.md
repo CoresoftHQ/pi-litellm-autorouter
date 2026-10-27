@@ -181,6 +181,13 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 }
 ```
 
+The classifier sees your last `classifierContextWindowSize` prompts as context, each cut to
+`classifierContextPerTurnChars`, so a short follow-up like "yes, do it" is rated by the work it continues.
+`classifierContextIncludeAssistantTurns: true` adds the assistant's latest text reply - the proposal a "yes"
+answers - without taking one of those slots. It's off by default: answers to question tools are already held
+on the model that asked, and your earlier prompts usually say what is being approved. Turn it on if the
+assistant often proposes work in plain text. The same settings apply to the decision-model classifier.
+
 ### Example: decision-model classifier (Jev, Clef)
 
 A decision model doesn't chat: it answers typed questions about a request, with a probability for each

@@ -105,8 +105,11 @@ export interface RouterConfig {
   /** Required when `classifierType` is `decision`. */
   decisionClassifierConfig: DecisionClassifierConfig | null;
   classifierFallback: ClassifierFallback;
+  /** How many of the user's prior asks the classifier sees as context. 0 sends none. */
   classifierContextWindowSize: number;
   classifierContextPerTurnChars: number;
+  /** Also quote the assistant's latest text reply, the one a "yes" answers. It never takes a
+   *  window slot from the user's own asks. */
   classifierContextIncludeAssistantTurns: boolean;
   keywordTierRules: KeywordTierRule[];
   escalationKeywords: string[];

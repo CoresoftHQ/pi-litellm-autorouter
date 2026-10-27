@@ -134,6 +134,59 @@ describe("extractTurn", () => {
     ).toEqual(["user", "assistant"]);
   });
 
+  it("quotes only the latest assistant text reply, without taking a window slot", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: [{ type: "text", text: "earlier narration" }] },
+      { role: "user", content: "u3" },
+      { role: "assistant", content: [{ type: "text", text: "let me check the config" }] },
+      { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
+      { role: "assistant", content: [{ type: "text", text: "Want me to also refactor the auth module?" }] },
+    ];
+    const turn = extractTurn("yes", messages, { ...options, includeAssistantTurns: true });
+    // All three user asks fit; the narration does not crowd them out.
+    expect(turn.priorTurns).toEqual([
+      { role: "user", text: "u1" },
+      { role: "user", text: "u2" },
+      { role: "user", text: "u3" },
+      { role: "assistant", text: "Want me to also refactor the auth module?" },
+    ]);
+  });
+
+  it("skips assistant messages that only call tools when looking for the latest reply", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: [{ type: "text", text: "Should I run the migrations?" }] },
+      { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: {} }] },
+    ];
+    const turn = extractTurn("go ahead", messages, { ...options, includeAssistantTurns: true });
+    expect(turn.priorTurns.map((t) => t.text)).toEqual(["u1", "Should I run the migrations?"]);
+  });
+
+  it("puts the assistant reply in its place in the conversation", () => {
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: [{ type: "text", text: "done, anything else?" }] },
+      { role: "user", content: "u2" },
+    ];
+    const turn = extractTurn("x", messages, { ...options, includeAssistantTurns: true });
+    expect(turn.priorTurns.map((t) => t.role)).toEqual(["user", "assistant", "user"]);
+  });
+
+  it("truncates the assistant reply like any quoted turn", () => {
+    const messages = [{ role: "assistant", content: [{ type: "text", text: "y".repeat(50) }] }];
+    const turn = extractTurn("x", messages, { ...options, includeAssistantTurns: true, perTurnChars: 5 });
+    expect(turn.priorTurns).toEqual([{ role: "assistant", text: "yyyyy…" }]);
+  });
+
+  it("quotes no assistant reply when the window is 0", () => {
+    const messages = [{ role: "assistant", content: [{ type: "text", text: "proceed?" }] }];
+    expect(
+      extractTurn("yes", messages, { ...options, includeAssistantTurns: true, contextWindowSize: 0 }).priorTurns,
+    ).toEqual([]);
+  });
+
   it("drops a prior turn that repeats the current ask", () => {
     const messages = [
       { role: "user", content: "real question" },
