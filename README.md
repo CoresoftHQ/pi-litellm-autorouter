@@ -522,6 +522,16 @@ npm test           # vitest run
 
 ## Changelog
 
+### 2.0.0
+
+- **Breaking:** routing is now a pi virtual model, `autoroute/auto`. Select it in `/model`, start pi with
+  `--model autoroute/auto`, or make it the default model to route; any other model bypasses the router.
+  Requires pi 0.99 or later.
+- Tool-call continuations, retries, steers and compaction summaries stay on the model serving the turn;
+  the thinking level selected on `autoroute/auto` is the default for tiers without their own
+- Add the decision-model classifier (`classifierType: "decision"`) for Jev, Clef and any other classifier
+  model pi supports
+
 ### 1.3.0
 
 - Allow configuring the extension without editing the json file
