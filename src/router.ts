@@ -67,7 +67,7 @@ export interface RouteInput {
    *  `question-reply.ts`; the router just honours it. */
   questionReply?: QuestionReplySignal | null;
   /** A model and optional thinking level forced for this one prompt via
-   *  `/autoroute next`. Outranks everything, including the plan-mode floor and a
+   *  `/autorouter next`. Outranks everything, including the plan-mode floor and a
    *  session pin. */
   oneShot?: TierTarget | string | null;
   /** Injected for testability; defaults to `Date.now`. */

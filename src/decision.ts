@@ -9,15 +9,30 @@ import type { CellSnapshot } from "./adaptive/router.ts";
 import type { RouterConfig } from "./config.ts";
 import { REQUEST_TYPES, type RouteDecision, type TierTarget } from "./types.ts";
 
-export const DECISION_ENTRY_TYPE = "autoroute-decision";
-export const STATE_ENTRY_TYPE = "autoroute-state";
+export const DECISION_ENTRY_TYPE = "autorouter-decision";
+export const STATE_ENTRY_TYPE = "autorouter-state";
+
+/** The entry types sessions from 1.x were written with. Read, never written, so a resumed
+ *  session keeps its pin, overrides and decision log. */
+export const LEGACY_DECISION_ENTRY_TYPE = "autoroute-decision";
+export const LEGACY_STATE_ENTRY_TYPE = "autoroute-state";
+
+/** Whether a session entry's custom type holds a routing decision, under either name. */
+export function isDecisionEntryType(customType: unknown): boolean {
+  return customType === DECISION_ENTRY_TYPE || customType === LEGACY_DECISION_ENTRY_TYPE;
+}
+
+/** Whether a session entry's custom type holds router state, under either name. */
+export function isStateEntryType(customType: unknown): boolean {
+  return customType === STATE_ENTRY_TYPE || customType === LEGACY_STATE_ENTRY_TYPE;
+}
 
 /** Persisted session state: the user's own overrides, which outrank the router. */
 export interface AutorouteState {
-  /** Routing paused for this session via `/autoroute off`: the router holds the model
+  /** Routing paused for this session via `/autorouter off`: the router holds the model
    *  already serving the session instead of classifying prompts. */
   disabled?: boolean;
-  /** A model pinned with `/autoroute pin`; every prompt is routed to it while set. */
+  /** A model pinned with `/autorouter pin`; every prompt is routed to it while set. */
   pinnedModel?: string | null;
   /** A model (and optional thinking level) forced for the next prompt only, then
    *  cleared. Outranks everything else, including `disabled` and `pinnedModel`. */
@@ -35,7 +50,7 @@ function firstFailedCandidate(decision: RouteDecision): { model: string; reason:
 }
 
 /**
- * A concise, actionable failure toast; `/autoroute explain` contains the entire chain.
+ * A concise, actionable failure toast; `/autorouter explain` contains the entire chain.
  *
  * `heldModel` is the model the request went to instead (the one already serving the
  * session); null when there was none and the request fails.
@@ -46,7 +61,7 @@ export function routingFailureNotice(decision: RouteDecision, heldModel: string 
   const target = decision.tier ? `${decision.tier} tier` : "default route";
   const reason = failure.reason.replace(/^has /, "");
   const outcome = heldModel ? `Keeping current model (${heldModel}).` : "No configured model is usable.";
-  return `autoroute: ${target} could not use ${failure.model} (${reason}). ${outcome} Run /autoroute explain for all attempted models.`;
+  return `autorouter: ${target} could not use ${failure.model} (${reason}). ${outcome} Run /autorouter explain for all attempted models.`;
 }
 
 /**
@@ -64,7 +79,7 @@ export function classifierFallbackNotice(decision: RouteDecision): string | null
     const signal = decision.signals.find((value) => value.startsWith(prefix));
     if (signal) {
       const reason = signal.slice(prefix.length, -1);
-      return `autoroute: ${name} unavailable; used heuristic classification instead (${reason}).`;
+      return `autorouter: ${name} unavailable; used heuristic classification instead (${reason}).`;
     }
   }
   return null;
@@ -75,10 +90,10 @@ export function statusLine(decision: RouteDecision): string {
   if (!decision.chosenModel) {
     // A hold is intentional; an exhausted candidate list is not. Keep the latter visible
     // in the footer rather than presenting it as the same benign "no change" state.
-    if (decision.cause === "question_reply") return "autoroute: held (question reply)";
+    if (decision.cause === "question_reply") return "autorouter: held (question reply)";
     const failure = firstFailedCandidate(decision);
-    if (failure) return `autoroute error: ${failure.model} unavailable`;
-    return "autoroute: no change";
+    if (failure) return `autorouter error: ${failure.model} unavailable`;
+    return "autorouter: no change";
   }
   const model = decision.chosenModel.split("/").slice(1).join("/") || decision.chosenModel;
   const parts = [decision.tier ?? decision.cause, model];
@@ -103,7 +118,7 @@ export function decisionLogLine(decision: RouteDecision): string {
   if (decision.escalated) parts.push("escalated=true");
   if (decision.planFloored) parts.push("plan_floored=true");
   if (decision.fellBackBecause) parts.push(`fallback=${JSON.stringify(decision.fellBackBecause)}`);
-  return `autoroute: routing decision ${parts.join(", ")}`;
+  return `autorouter: routing decision ${parts.join(", ")}`;
 }
 
 /** The slice of pi's TUI theme the renderer needs. */
@@ -146,7 +161,7 @@ export function renderDecisionEntry(decision: RouteDecision, expanded: boolean, 
   };
 }
 
-/** Multi-line explanation for `/autoroute` and `/autoroute explain`. */
+/** Multi-line explanation for `/autorouter` and `/autorouter explain`. */
 export function explain(decision: RouteDecision, dimensions?: { name: string; score: number; signal?: string }[]): string {
   const lines: string[] = [];
   lines.push(`tier:     ${decision.tier ?? "(none)"}`);
@@ -195,7 +210,7 @@ export function explain(decision: RouteDecision, dimensions?: { name: string; sc
   return lines.join("\n");
 }
 
-/** The bandit's posteriors, one block per request type, for `/autoroute adaptive`. */
+/** The bandit's posteriors, one block per request type, for `/autorouter adaptive`. */
 export function renderAdaptiveSnapshot(cells: CellSnapshot[], config: RouterConfig, storePath: string): string {
   const lines: string[] = [];
   lines.push(

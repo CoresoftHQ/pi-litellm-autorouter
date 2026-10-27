@@ -23,7 +23,7 @@ export interface SemanticMatch {
   tier: Tier;
   /** Cosine similarity of the winning utterance. */
   score: number;
-  /** The keyword the prompt was closest to — reported for `/autoroute explain`, not as a
+  /** The keyword the prompt was closest to — reported for `/autorouter explain`, not as a
    *  literal match: upstream leaves `matched_keyword` empty on semantic hits. */
   nearestKeyword: string;
 }

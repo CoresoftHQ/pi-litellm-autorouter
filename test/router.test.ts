@@ -548,7 +548,7 @@ describe("decisionLogLine", () => {
   it("mirrors upstream's greppable shape and adds pi's extras only when set", async () => {
     const plain = await route({ turn: turn("hi"), config: config(), models: lookup(), now });
     expect(decisionLogLine(plain.decision)).toBe(
-      `autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=${plain.decision.score!.toFixed(3)}, ` +
+      `autorouter: routing decision cause=heuristic_scorer, tier=SIMPLE, score=${plain.decision.score!.toFixed(3)}, ` +
         `signals=[${plain.decision.signals.join(", ")}], routed_model=anthropic/haiku`,
     );
 
@@ -560,7 +560,7 @@ describe("decisionLogLine", () => {
       pin: { model: "anthropic/opus", tier: "REASONING", expiresAt: now() + 1 },
     });
     expect(decisionLogLine(pinned.decision)).toBe(
-      "autoroute: routing decision cause=session_affinity_pin, tier=REASONING, routed_model=anthropic/opus",
+      "autorouter: routing decision cause=session_affinity_pin, tier=REASONING, routed_model=anthropic/opus",
     );
 
     const keyword = await route({
@@ -570,7 +570,7 @@ describe("decisionLogLine", () => {
       now,
     });
     expect(decisionLogLine(keyword.decision)).toBe(
-      'autoroute: routing decision cause=literal_keyword_match, tier=MEDIUM, routed_model=anthropic/sonnet, keyword="typo", escalated=true',
+      'autorouter: routing decision cause=literal_keyword_match, tier=MEDIUM, routed_model=anthropic/sonnet, keyword="typo", escalated=true',
     );
   });
 });

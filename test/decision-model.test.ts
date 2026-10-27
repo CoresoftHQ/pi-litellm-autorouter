@@ -363,7 +363,7 @@ describe("route — decision", () => {
     expect(decision.cause).toBe("heuristic_scorer");
     expect(decision.signals).toContain("decision_fallback (decision classifier failed (no API key for typesafe))");
     expect(classifierFallbackNotice(decision)).toBe(
-      "autoroute: decision classifier unavailable; used heuristic classification instead (decision classifier failed (no API key for typesafe)).",
+      "autorouter: decision classifier unavailable; used heuristic classification instead (decision classifier failed (no API key for typesafe)).",
     );
   });
 

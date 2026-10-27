@@ -105,7 +105,7 @@ export class ClassifierCircuitBreaker {
     private readonly clock: () => number = () => performance.now() / 1000,
   ) {}
 
-  /** Whether a timeout has the circuit open or probing, for `/autoroute`. */
+  /** Whether a timeout has the circuit open or probing, for `/autorouter`. */
   isOpen(): boolean {
     return this.state !== "closed";
   }

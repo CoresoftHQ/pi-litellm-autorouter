@@ -175,7 +175,7 @@ export interface LoadedConfig {
   warnings: string[];
   /** Fatal problems. Routing is disabled and `config.enabled` is false. */
   errors: string[];
-  /** Files that contributed, for `/autoroute`. */
+  /** Files that contributed, for `/autorouter`. */
   sources: string[];
   /** True when there is no config file at all (as opposed to one that failed to load). */
   missing: boolean;
@@ -702,7 +702,7 @@ export function buildConfig(layers: unknown[]): { config: RouterConfig; warnings
     errors.push('decisionClassifierConfig is required when classifierType is "decision"');
   }
   if (config.classifierType !== "decision" && config.decisionClassifierConfig) {
-    // A warning, not an error: `/autoroute set classifierType llm` has to be able to switch
+    // A warning, not an error: `/autorouter set classifierType llm` has to be able to switch
     // classifiers without first deleting the block it switches from.
     warnings.push('decisionClassifierConfig has no effect unless classifierType is "decision"');
   }

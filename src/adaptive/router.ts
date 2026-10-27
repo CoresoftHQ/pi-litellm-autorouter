@@ -160,7 +160,7 @@ export class AdaptiveRouter {
     return { version: 1, cells };
   }
 
-  /** Human-readable state for `/autoroute adaptive`. */
+  /** Human-readable state for `/autorouter adaptive`. */
   snapshot(): CellSnapshot[] {
     const rows: CellSnapshot[] = [];
     for (const requestType of REQUEST_TYPES) {

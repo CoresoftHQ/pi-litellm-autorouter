@@ -32,7 +32,10 @@ import { ClassifierCircuitBreaker } from "./classify/decision-model.ts";
 import {
   type AutorouteState,
   DECISION_ENTRY_TYPE,
+  LEGACY_DECISION_ENTRY_TYPE,
   STATE_ENTRY_TYPE,
+  isDecisionEntryType,
+  isStateEntryType,
   decisionLogLine,
   explain,
   renderAdaptiveSnapshot,
@@ -72,7 +75,7 @@ import {
   type TierTarget,
 } from "./types.ts";
 
-const STATUS_KEY = "autoroute";
+const STATUS_KEY = "autorouter";
 
 /** The router's place in pi's model catalog: `autorouter/tiered`. The provider id is used by
  *  nothing else, so the model needs no credentials of its own and is always selectable. */
@@ -248,7 +251,7 @@ export default function autorouter(pi: ExtensionAPI): void {
   const supportsVirtualModels =
     typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
-  pi.registerFlag("no-autoroute", {
+  pi.registerFlag("no-autorouter", {
     description: "Start with automatic model routing paused (autorouter/tiered holds its current model)",
     type: "boolean",
     default: false,
@@ -258,10 +261,13 @@ export default function autorouter(pi: ExtensionAPI): void {
   // draw in the chat without it ever reaching the model; this is the drawing. It renders
   // live as each entry is appended and again when a session is resumed, and ctrl+o
   // (expand tool output) swaps the one-liner for the full explanation.
-  pi.registerEntryRenderer<RouteDecision>(DECISION_ENTRY_TYPE, (entry, { expanded }, theme) => {
-    if (config?.decisionLog === false || !entry.data) return undefined;
-    return renderDecisionEntry(entry.data, expanded, theme) as never;
-  });
+  // Sessions from 1.x stored decisions under the old entry type; they are drawn the same way.
+  for (const entryType of [DECISION_ENTRY_TYPE, LEGACY_DECISION_ENTRY_TYPE]) {
+    pi.registerEntryRenderer<RouteDecision>(entryType, (entry, { expanded }, theme) => {
+      if (config?.decisionLog === false || !entry.data) return undefined;
+      return renderDecisionEntry(entry.data, expanded, theme) as never;
+    });
+  }
 
   /** The same line for runs with no chat to draw in (`pi -p`, RPC): stderr, so it never
    *  mixes with the agent's own output on stdout. */
@@ -312,12 +318,12 @@ export default function autorouter(pi: ExtensionAPI): void {
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type !== "custom") continue;
         const custom = entry as { customType?: string; data?: unknown };
-        if (custom.customType === STATE_ENTRY_TYPE && custom.data) {
+        if (isStateEntryType(custom.customType) && custom.data) {
           state = { ...state, ...(custom.data as AutorouteState) };
         }
-        // Decisions are replayed too, so `/autoroute explain` and a question reply in a
+        // Decisions are replayed too, so `/autorouter explain` and a question reply in a
         // session from before router state existed still know the last tier.
-        if (custom.customType === DECISION_ENTRY_TYPE && custom.data) {
+        if (isDecisionEntryType(custom.customType) && custom.data) {
           lastDecision = custom.data as RouteDecision;
         }
       }
@@ -372,7 +378,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       reloadConfig(ctx);
       return target;
     } catch (err) {
-      ctx.ui.notify(`autoroute: could not write settings: ${err instanceof Error ? err.message : String(err)}`, "error");
+      ctx.ui.notify(`autorouter: could not write settings: ${err instanceof Error ? err.message : String(err)}`, "error");
       return null;
     }
   };
@@ -380,8 +386,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   /** Why prompts are not being classified, or null when they are. */
   const routingDisabled = (): string | null => {
     if (!config?.enabled) return "no usable config";
-    if (pi.getFlag("no-autoroute") === true) return "--no-autoroute";
-    if (state.disabled) return "/autoroute off";
+    if (pi.getFlag("no-autorouter") === true) return "--no-autorouter";
+    if (state.disabled) return "/autorouter off";
     if (state.pinnedModel) return `pinned to ${state.pinnedModel}`;
     return null;
   };
@@ -390,7 +396,7 @@ export default function autorouter(pi: ExtensionAPI): void {
   const physicalModels = (models: readonly unknown[]): CandidateModel[] =>
     models.filter((model) => !isVirtualModel(model)) as CandidateModel[];
 
-  /** The model serving this session, for `/autoroute pin` without an argument. */
+  /** The model serving this session, for `/autorouter pin` without an argument. */
   const currentServedModel = (ctx: ExtensionContext): ModelRef | null => {
     try {
       const messages = ctx.sessionManager
@@ -409,8 +415,8 @@ export default function autorouter(pi: ExtensionAPI): void {
   const checkCommandModel = (model: string, ctx: ExtensionContext): string | null => {
     const ref = splitModelRef(model);
     const found = ref ? ctx.modelRegistry.find(ref.provider, ref.modelId) : undefined;
-    if (!found) return `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5-5.`;
-    if (isVirtualModel(found)) return `autoroute: "${model}" is a virtual model; route to a physical model instead.`;
+    if (!found) return `autorouter: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5-5.`;
+    if (isVirtualModel(found)) return `autorouter: "${model}" is a virtual model; route to a physical model instead.`;
     return null;
   };
 
@@ -473,7 +479,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       return fallback ? toRoute(fallback.target, fallback.thinkingLevel) : null;
     };
     const unroutable = (why: string): Error =>
-      new Error(`autoroute: ${why}. Run /autoroute for details, or pick another model with /model.`);
+      new Error(`autorouter: ${why}. Run /autorouter for details, or pick another model with /model.`);
 
     // Only a new prompt is classified. Tool-call continuations and retries stay on the
     // model serving the turn, which keeps prompt caches and thinking signatures valid; a
@@ -497,7 +503,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       const held = hold(false);
       if (held) return held;
       const why = configMissing
-        ? "no autorouter config (run /autoroute init)"
+        ? "no autorouter config (run /autorouter init)"
         : (configErrors[0] ?? "routing is disabled in autorouter.json");
       throw unroutable(why);
     }
@@ -507,7 +513,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     // cleared afterwards, so "off" still means off from the next prompt onwards.
     const oneShot = state.nextTarget ?? (state.nextModel ? { model: state.nextModel } : null);
 
-    const paused = pi.getFlag("no-autoroute") === true ? "--no-autoroute" : state.disabled ? "/autoroute off" : null;
+    const paused = pi.getFlag("no-autorouter") === true ? "--no-autorouter" : state.disabled ? "/autorouter off" : null;
     if (paused && !oneShot) {
       const held = hold(true);
       if (held) return held;
@@ -517,7 +523,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     if (state.pinnedModel && !oneShot) {
       const pinned = resolveModelRef(state.pinnedModel, lookup);
       if ("target" in pinned) return toRoute(pinned.target, null);
-      if (ctx.hasUI) ctx.ui.notify(`autoroute: cannot use the pinned model: ${pinned.problem}`, "error");
+      if (ctx.hasUI) ctx.ui.notify(`autorouter: cannot use the pinned model: ${pinned.problem}`, "error");
       const held = hold(false);
       if (held) return held;
       throw unroutable(`cannot use the pinned model: ${pinned.problem}`);
@@ -566,7 +572,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       // Choosing a model is a routing decision; a failure in it falls back to the model
       // already serving the session rather than failing the turn, whenever there is one.
       const message = err instanceof Error ? err.message : String(err);
-      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `autoroute error: ${message}`);
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `autorouter error: ${message}`);
       const held = hold(true);
       if (held) return held;
       throw unroutable(message);
@@ -580,7 +586,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       state.nextModel = null;
       persistState();
       if (ctx.hasUI && !decision.chosenModel) {
-        ctx.ui.notify(`autoroute: ${decision.fellBackBecause ?? "one-shot override failed"}`, "error");
+        ctx.ui.notify(`autorouter: ${decision.fellBackBecause ?? "one-shot override failed"}`, "error");
       }
     }
 
@@ -599,7 +605,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     const failureNotice = !decision.chosenModel ? routingFailureNotice(decision, heldModel) : null;
     if (ctx.hasUI) {
       ctx.ui.setStatus(STATUS_KEY, statusLine(decision));
-      // The full candidate failures remain in the decision entry and `/autoroute explain`;
+      // The full candidate failures remain in the decision entry and `/autorouter explain`;
       // keep the toast actionable.
       if (failureNotice) ctx.ui.notify(failureNotice, "error");
       const classifierNotice = classifierFallbackNotice(decision);
@@ -643,16 +649,16 @@ export default function autorouter(pi: ExtensionAPI): void {
     }
 
     if (!supportsVirtualModels && ctx.hasUI) {
-      ctx.ui.notify("autoroute needs a pi version with virtual models (pi.registerVirtualModel); please update pi", "error");
+      ctx.ui.notify("autorouter needs a pi version with virtual models (pi.registerVirtualModel); please update pi", "error");
       return;
     }
     if (!ctx.hasUI) return;
     if (configMissing) {
       // Nothing to report until the router is actually selected without a config.
-      if (isRouterModel(ctx.model)) ctx.ui.notify(`autoroute: no config yet; run /autoroute init`, "warning");
+      if (isRouterModel(ctx.model)) ctx.ui.notify(`autorouter: no config yet; run /autorouter init`, "warning");
     } else if (configErrors.length > 0) {
       // Loud, but not fatal: a broken router config must not stop the agent from starting.
-      ctx.ui.notify(`autoroute disabled: ${configErrors[0]}`, "error");
+      ctx.ui.notify(`autorouter disabled: ${configErrors[0]}`, "error");
     }
   });
 
@@ -660,16 +666,21 @@ export default function autorouter(pi: ExtensionAPI): void {
   // native state to query. Instead this is an integration contract: a plan-mode extension
   // announces its state on the shared bus and the router treats it as a tier floor.
   //
-  //   pi.events.emit("autoroute:plan-mode", { active: true })
+  //   pi.events.emit("autorouter:plan-mode", { active: true })
   //
   // Failing that, `planMode.patterns` still matches sentinels carried in prompt text,
   // which is the only mechanism the LiteLLM proxy has. Text sentinels are spoofable by
   // anyone who pastes one, which is why the floor can only raise a tier, never lower it.
-  pi.events.on("autoroute:plan-mode", (payload: unknown) => {
-    planModeActive = Boolean(
-      payload && typeof payload === "object" && (payload as { active?: unknown }).active,
-    );
-  });
+  //
+  // "autoroute:plan-mode", the channel's name before 2.0, is still heard, so a plan-mode
+  // extension written against 1.x keeps working.
+  for (const channel of ["autorouter:plan-mode", "autoroute:plan-mode"]) {
+    pi.events.on(channel, (payload: unknown) => {
+      planModeActive = Boolean(
+        payload && typeof payload === "object" && (payload as { active?: unknown }).active,
+      );
+    });
+  }
 
   // Who sent the prompt that is about to start a run. Pi routes every user message the
   // same way, so this is the only place an extension's `sendUserMessage` can be told apart
@@ -735,7 +746,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         classifier: useLLM ? "llm" : "heuristic",
       });
     } catch (err) {
-      ctx.ui.notify(`autoroute init: ${err instanceof Error ? err.message : String(err)}`, "error");
+      ctx.ui.notify(`autorouter init: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
 
@@ -744,7 +755,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       : join(homedir(), ".pi", "agent", "autorouter.json");
 
     const preview = [
-      `autoroute init — ${scoped.length > 0 ? "session-scoped models" : "all available models"}`,
+      `autorouter init — ${scoped.length > 0 ? "session-scoped models" : "all available models"}`,
       "",
       renderInitPreview(result),
       "",
@@ -753,18 +764,18 @@ export default function autorouter(pi: ExtensionAPI): void {
 
     if (existsSync(target)) {
       if (!ctx.hasUI) {
-        ctx.ui.notify(`autoroute init: ${target} already exists (no UI available to confirm)`, "error");
+        ctx.ui.notify(`autorouter init: ${target} already exists (no UI available to confirm)`, "error");
         return;
       }
-      const ok = await ctx.ui.confirm("Overwrite existing autoroute config?", `${target}\n\n${preview}`);
+      const ok = await ctx.ui.confirm("Overwrite existing autorouter config?", `${target}\n\n${preview}`);
       if (!ok) {
-        ctx.ui.notify("autoroute init: cancelled", "info");
+        ctx.ui.notify("autorouter init: cancelled", "info");
         return;
       }
     } else if (ctx.hasUI) {
-      const ok = await ctx.ui.confirm("Write this autoroute config?", preview);
+      const ok = await ctx.ui.confirm("Write this autorouter config?", preview);
       if (!ok) {
-        ctx.ui.notify("autoroute init: cancelled", "info");
+        ctx.ui.notify("autorouter init: cancelled", "info");
         return;
       }
     }
@@ -773,7 +784,7 @@ export default function autorouter(pi: ExtensionAPI): void {
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
     } catch (err) {
-      ctx.ui.notify(`autoroute init: could not write ${target}: ${err instanceof Error ? err.message : err}`, "error");
+      ctx.ui.notify(`autorouter init: could not write ${target}: ${err instanceof Error ? err.message : err}`, "error");
       return;
     }
 
@@ -788,7 +799,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     ctx.ui.notify(`${preview}\n\n  written. ${outcome}.`, "info");
   };
 
-  pi.registerCommand("autoroute", {
+  pi.registerCommand("autorouter", {
     description: `Show or control automatic model routing (select ${VIRTUAL_MODEL_REF} to route)`,
     getArgumentCompletions: (prefix: string) => {
       // `next` and `pin` both take a model, so complete against the catalogue once the
@@ -820,7 +831,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           const path = rest[explicitScope ? 1 : 0];
           const valueParts = rest.slice(explicitScope ? 2 : 1);
           if (!path || valueParts.length === 0) {
-            ctx.ui.notify('usage: /autoroute set [global|project] <setting.path> <JSON value>', "info");
+            ctx.ui.notify('usage: /autorouter set [global|project] <setting.path> <JSON value>', "info");
             return;
           }
           const updated = configToJson(config ?? loadConfig(ctx.cwd).config);
@@ -828,27 +839,27 @@ export default function autorouter(pi: ExtensionAPI): void {
           // settings edit is an explicit recovery action, except when it itself sets enabled.
           if (path !== "enabled") updated.enabled = true;
           if (!setPath(updated, path, readSettingValue(valueParts.join(" ")))) {
-            ctx.ui.notify(`autoroute: invalid setting path "${path}"`, "error");
+            ctx.ui.notify(`autorouter: invalid setting path "${path}"`, "error");
             return;
           }
           const checked = buildConfig([updated]);
           if (checked.errors.length > 0) {
-            ctx.ui.notify(`autoroute: setting was not saved: ${checked.errors.join("; ")}`, "error");
+            ctx.ui.notify(`autorouter: setting was not saved: ${checked.errors.join("; ")}`, "error");
             return;
           }
           const target = writeConfig(scope, configToJson(checked.config), ctx);
-          if (target) ctx.ui.notify(`autoroute: set ${path} in ${scope} settings (${target})`, "info");
+          if (target) ctx.ui.notify(`autorouter: set ${path} in ${scope} settings (${target})`, "info");
           return;
         }
 
         case "tier": {
           const [tierName, model, thinking] = rest;
           if (!tierName || !model || rest.length > 3 || !isTier(tierName)) {
-            ctx.ui.notify("usage: /autoroute tier <SIMPLE|MEDIUM|COMPLEX|REASONING> <provider/model> [thinking-level]", "info");
+            ctx.ui.notify("usage: /autorouter tier <SIMPLE|MEDIUM|COMPLEX|REASONING> <provider/model> [thinking-level]", "info");
             return;
           }
           if (thinking !== undefined && !isThinkingLevel(thinking)) {
-            ctx.ui.notify("autoroute: thinking level must be one of off, minimal, low, medium, high, xhigh, max", "error");
+            ctx.ui.notify("autorouter: thinking level must be one of off, minimal, low, medium, high, xhigh, max", "error");
             return;
           }
           const problem = checkCommandModel(model, ctx);
@@ -861,11 +872,11 @@ export default function autorouter(pi: ExtensionAPI): void {
           setPath(updated, `tiers.${tierName}`, thinking ? { model, thinkingLevel: thinking } : model);
           const checked = buildConfig([updated]);
           if (checked.errors.length > 0) {
-            ctx.ui.notify(`autoroute: tier was not saved: ${checked.errors.join("; ")}`, "error");
+            ctx.ui.notify(`autorouter: tier was not saved: ${checked.errors.join("; ")}`, "error");
             return;
           }
           const target = writeConfig("project", configToJson(checked.config), ctx);
-          if (target) ctx.ui.notify(`autoroute: ${tierName} → ${model}${thinking ? ` (${thinking})` : ""}`, "info");
+          if (target) ctx.ui.notify(`autorouter: ${tierName} → ${model}${thinking ? ` (${thinking})` : ""}`, "info");
           return;
         }
 
@@ -875,12 +886,12 @@ export default function autorouter(pi: ExtensionAPI): void {
             state.nextTarget = null;
             state.nextModel = null;
             persistState();
-            ctx.ui.notify(had ? `autoroute: cleared one-shot override (${had.model})` : "autoroute: no override set", "info");
+            ctx.ui.notify(had ? `autorouter: cleared one-shot override (${had.model})` : "autorouter: no override set", "info");
             return;
           }
           const [model, thinking] = rest;
           if (!model || rest.length > 2 || (thinking !== undefined && !isThinkingLevel(thinking))) {
-            ctx.ui.notify("usage: /autoroute next <provider/model> [thinking-level]", "info");
+            ctx.ui.notify("usage: /autorouter next <provider/model> [thinking-level]", "info");
             return;
           }
           // Validate now rather than at the next prompt: a typo should fail while the user
@@ -893,7 +904,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           state.nextTarget = thinking ? { model, thinkingLevel: thinking } : { model };
           persistState();
           const hint = isRouterModel(ctx.model) ? "" : ` (applies once ${VIRTUAL_MODEL_REF} is selected)`;
-          ctx.ui.notify(`autoroute: next prompt only → ${model}${thinking ? ` (${thinking})` : ""}${hint}`, "info");
+          ctx.ui.notify(`autorouter: next prompt only → ${model}${thinking ? ` (${thinking})` : ""}${hint}`, "info");
           return;
         }
 
@@ -906,8 +917,8 @@ export default function autorouter(pi: ExtensionAPI): void {
           const selected = await selectRouterModel(ctx);
           ctx.ui.notify(
             selected
-              ? `autoroute: on (${VIRTUAL_MODEL_REF})`
-              : `autoroute: on, but ${VIRTUAL_MODEL_REF} could not be selected; pick it in /model`,
+              ? `autorouter: on (${VIRTUAL_MODEL_REF})`
+              : `autorouter: on, but ${VIRTUAL_MODEL_REF} could not be selected; pick it in /model`,
             selected ? "info" : "error",
           );
           return;
@@ -918,7 +929,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           persistState();
           ctx.ui.setStatus(STATUS_KEY, undefined);
           ctx.ui.notify(
-            `autoroute: off for this session; ${VIRTUAL_MODEL_REF} keeps the model it is on. Pick another model with /model to leave the router.`,
+            `autorouter: off for this session; ${VIRTUAL_MODEL_REF} keeps the model it is on. Pick another model with /model to leave the router.`,
             "info",
           );
           return;
@@ -926,7 +937,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         case "pin": {
           const model = rest.join(" ") || currentServedModel(ctx);
           if (!model) {
-            ctx.ui.notify("usage: /autoroute pin <provider/model>", "info");
+            ctx.ui.notify("usage: /autorouter pin <provider/model>", "info");
             return;
           }
           const problem = checkCommandModel(model, ctx);
@@ -936,19 +947,19 @@ export default function autorouter(pi: ExtensionAPI): void {
           }
           state.pinnedModel = model;
           persistState();
-          ctx.ui.notify(`autoroute: pinned to ${model}`, "info");
+          ctx.ui.notify(`autorouter: pinned to ${model}`, "info");
           return;
         }
 
         case "unpin":
           state.pinnedModel = null;
           persistState();
-          ctx.ui.notify("autoroute: unpinned", "info");
+          ctx.ui.notify("autorouter: unpinned", "info");
           return;
 
         case "explain": {
           if (!lastDecision) {
-            ctx.ui.notify("autoroute: no decision yet this session", "info");
+            ctx.ui.notify("autorouter: no decision yet this session", "info");
             return;
           }
           // Re-score the last ask so the per-dimension breakdown reflects the same input
@@ -970,7 +981,7 @@ export default function autorouter(pi: ExtensionAPI): void {
         }
 
         case "log": {
-          // The session's decisions, oldest first, as log lines; `/autoroute log 5` for the
+          // The session's decisions, oldest first, as log lines; `/autorouter log 5` for the
           // last five. Read back from the session so it works after a resume too.
           const limit = Number.parseInt(rest[0] ?? "", 10);
           const decisions: RouteDecision[] = [];
@@ -978,14 +989,14 @@ export default function autorouter(pi: ExtensionAPI): void {
             for (const entry of ctx.sessionManager.getEntries()) {
               if (entry.type !== "custom") continue;
               const custom = entry as { customType?: string; data?: unknown };
-              if (custom.customType === DECISION_ENTRY_TYPE && custom.data) decisions.push(custom.data as RouteDecision);
+              if (isDecisionEntryType(custom.customType) && custom.data) decisions.push(custom.data as RouteDecision);
             }
           } catch {
             // Unreadable history: fall through to whatever this process saw.
           }
           if (decisions.length === 0 && lastDecision) decisions.push(lastDecision);
           if (decisions.length === 0) {
-            ctx.ui.notify("autoroute: no decisions yet this session", "info");
+            ctx.ui.notify("autorouter: no decisions yet this session", "info");
             return;
           }
           const shown = Number.isFinite(limit) && limit > 0 ? decisions.slice(-limit) : decisions;
@@ -995,7 +1006,7 @@ export default function autorouter(pi: ExtensionAPI): void {
 
         case "adaptive": {
           if (!config?.adaptive || !adaptive) {
-            ctx.ui.notify("autoroute: adaptive selection is off (set \"adaptive\": true in autorouter.json)", "info");
+            ctx.ui.notify("autorouter: adaptive selection is off (set \"adaptive\": true in autorouter.json)", "info");
             return;
           }
           ctx.ui.notify(renderAdaptiveSnapshot(adaptive.snapshot(), config, adaptiveStorePath), "info");
@@ -1008,7 +1019,7 @@ export default function autorouter(pi: ExtensionAPI): void {
           lines.push(`status:   ${why ? `disabled (${why})` : "on"}`);
           lines.push(
             `model:    ${VIRTUAL_MODEL_REF} ${
-              isRouterModel(ctx.model) ? "(selected)" : "(not selected: /autoroute on, or pick it in /model)"
+              isRouterModel(ctx.model) ? "(selected)" : "(not selected: /autorouter on, or pick it in /model)"
             }`,
           );
           if (config) {

@@ -265,7 +265,7 @@ let originalProfile: string | undefined;
  *  a developer's own global config (and learned posteriors) cannot leak in, or be
  *  overwritten. os.homedir() reads HOME on POSIX and USERPROFILE on Windows. */
 function isolateHome(): void {
-  home = mkdtempSync(join(tmpdir(), "autoroute-home-"));
+  home = mkdtempSync(join(tmpdir(), "autorouter-home-"));
   originalHome = process.env.HOME;
   originalProfile = process.env.USERPROFILE;
   process.env.HOME = home;
@@ -285,7 +285,7 @@ const created: string[] = [];
 
 /** A project directory with `config` as its autorouter.json; null for none at all. */
 function projectDir(config: unknown = CONFIG): string {
-  const dir = mkdtempSync(join(tmpdir(), "autoroute-cwd-"));
+  const dir = mkdtempSync(join(tmpdir(), "autorouter-cwd-"));
   created.push(dir);
   mkdirSync(join(dir, ".pi"), { recursive: true });
   if (config !== null) writeFileSync(join(dir, ".pi", "autorouter.json"), typeof config === "string" ? config : JSON.stringify(config));
@@ -313,12 +313,12 @@ describe("extension wiring", () => {
     expect(router?.provider).toBe("autorouter");
     expect(router?.id).toBe("tiered");
     expect(router?.thinkingLevels).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-    expect(m.pi.registerFlag).toHaveBeenCalledWith("no-autoroute", expect.anything());
-    expect(m.commands.has("autoroute")).toBe(true);
+    expect(m.pi.registerFlag).toHaveBeenCalledWith("no-autorouter", expect.anything());
+    expect(m.commands.has("autorouter")).toBe(true);
     for (const event of ["session_start", "input", "model_select", "agent_end"]) {
       expect(m.handlers.has(event), `expected a handler for ${event}`).toBe(true);
     }
-    expect(m.pi.events.on).toHaveBeenCalledWith("autoroute:plan-mode", expect.anything());
+    expect(m.pi.events.on).toHaveBeenCalledWith("autorouter:plan-mode", expect.anything());
   });
 
   it("says so, rather than failing silently, on a pi without virtual models", async () => {
@@ -344,7 +344,7 @@ describe("extension wiring", () => {
     expect(decision.tier).toBe("SIMPLE");
     expect(decision.chosenModel).toBe("anthropic/haiku");
     expect(routed.state).toEqual({ tier: "SIMPLE", model: "anthropic/haiku", thinkingLevel: "medium", pin: null });
-    expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("autoroute", "SIMPLE · haiku");
+    expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("autorouter", "SIMPLE · haiku");
   });
 
   it("passes the selected thinking level through when the tier sets none", async () => {
@@ -435,9 +435,9 @@ describe("extension wiring", () => {
     const decision = m.decisions()[0]!;
     expect(decision.chosenModel).toBeNull();
     expect(decision.fellBackBecause).toContain("has no available credentials");
-    expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("autoroute", "autoroute error: anthropic/haiku unavailable");
+    expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("autorouter", "autorouter error: anthropic/haiku unavailable");
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(
-      "autoroute: SIMPLE tier could not use anthropic/haiku (no available credentials). Keeping current model (anthropic/sonnet). Run /autoroute explain for all attempted models.",
+      "autorouter: SIMPLE tier could not use anthropic/haiku (no available credentials). Keeping current model (anthropic/sonnet). Run /autorouter explain for all attempted models.",
       "error",
     );
   });
@@ -450,7 +450,7 @@ describe("extension wiring", () => {
     h.ctx.modelRegistry.hasConfiguredAuth = () => false;
 
     await expect(h.prompt("hi")).rejects.toThrow(
-      "autoroute: SIMPLE tier could not use anthropic/haiku (no available credentials). No configured model is usable.",
+      "autorouter: SIMPLE tier could not use anthropic/haiku (no available credentials). No configured model is usable.",
     );
     expect(m.decisions()).toHaveLength(1);
   });
@@ -566,10 +566,10 @@ describe("extension wiring", () => {
     expect(refOf(routed.model)).toBe("anthropic/haiku");
   });
 
-  it("holds the current model when --no-autoroute is set", async () => {
+  it("holds the current model when --no-autorouter is set", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
-    m.flags.set("no-autoroute", true);
+    m.flags.set("no-autorouter", true);
     const h = harness(m, dir);
     await h.start();
 
@@ -599,8 +599,8 @@ describe("extension wiring", () => {
     const h = harness(m, empty);
     await h.start();
 
-    expect(h.ctx.ui.notify).toHaveBeenCalledWith("autoroute: no config yet; run /autoroute init", "warning");
-    await expect(h.prompt("hi")).rejects.toThrow(/no autorouter config \(run \/autoroute init\)/);
+    expect(h.ctx.ui.notify).toHaveBeenCalledWith("autorouter: no config yet; run /autorouter init", "warning");
+    await expect(h.prompt("hi")).rejects.toThrow(/no autorouter config \(run \/autorouter init\)/);
 
     // Not a word while another model is selected: the router is simply not in use.
     const other = mockPi();
@@ -621,7 +621,7 @@ describe("extension wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("autoroute disabled"), "error");
+    expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("autorouter disabled"), "error");
     await expect(h.prompt("hi")).rejects.toThrow(/autorouter\.json/);
   });
 
@@ -644,12 +644,57 @@ describe("extension wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    m.emit("autoroute:plan-mode", { active: true });
+    m.emit("autorouter:plan-mode", { active: true });
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/sonnet");
     expect(m.decisions()[0]?.planFloored).toBe(true);
 
-    m.emit("autoroute:plan-mode", { active: false });
+    m.emit("autorouter:plan-mode", { active: false });
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
+  });
+
+  it("still hears plan mode on the channel name from before 2.0", async () => {
+    writeFileSync(join(dir, ".pi", "autorouter.json"), JSON.stringify({ ...CONFIG, planMode: { minTier: "COMPLEX" } }));
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const h = harness(m, dir);
+    await h.start();
+
+    m.emit("autoroute:plan-mode", { active: true });
+    expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/sonnet");
+  });
+
+  it("resumes a 1.x session's router state and decisions from their old entry types", async () => {
+    const m = mockPi();
+    autorouter(m.pi as never);
+    const h = harness(m, dir);
+    const old: RouteDecision = {
+      cause: "heuristic_scorer",
+      tier: "COMPLEX",
+      score: 0.2,
+      signals: [],
+      matchedKeyword: null,
+      escalationKeyword: null,
+      escalated: false,
+      planFloored: false,
+      chosenModel: "anthropic/sonnet",
+      thinkingLevel: null,
+      latencyMs: 1,
+    };
+    h.branch.push({ type: "custom", customType: "autoroute-state", data: { pinnedModel: "anthropic/opus" } });
+    h.branch.push({ type: "custom", customType: "autoroute-decision", data: old });
+    await h.start();
+
+    // The pin written by 1.x still applies...
+    expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/opus");
+    // ...its decisions still replay...
+    await m.commands.get("autorouter")!.handler("log", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("tier=COMPLEX"), "info");
+    // ...and still draw in the chat.
+    const render = m.entryRenderers.get("autoroute-decision")!;
+    expect(render({ type: "custom", customType: "autoroute-decision", data: old }, { expanded: false }, THEME)).toBeDefined();
+    // New state is written under the new name only.
+    await m.commands.get("autorouter")!.handler("unpin", h.ctx);
+    expect(m.entries.at(-1)?.type).toBe("autorouter-state");
   });
 
   it("forces a model for exactly one prompt, then reverts", async () => {
@@ -657,7 +702,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("next anthropic/opus", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/opus", h.ctx);
 
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/opus");
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
@@ -669,7 +714,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("next anthropic/opus max", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/opus max", h.ctx);
 
     const routed = await h.prompt("hi");
 
@@ -685,7 +730,7 @@ describe("extension wiring", () => {
     await h.start();
 
     await h.prompt("hi", { keepRunning: true });
-    await m.commands.get("autoroute")!.handler("next anthropic/opus", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/opus", h.ctx);
     h.branch.push({ type: "message", message: { role: "user", content: "also this" } });
     expect(refOf((await h.request("user")).model)).toBe("anthropic/haiku");
     await m.fire("agent_end", { messages: [] }, h.ctx);
@@ -698,8 +743,8 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("next anthropic/opus", h.ctx);
-    await m.commands.get("autoroute")!.handler("next", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/opus", h.ctx);
+    await m.commands.get("autorouter")!.handler("next", h.ctx);
 
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
   });
@@ -711,8 +756,8 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("off", h.ctx);
-    await m.commands.get("autoroute")!.handler("next anthropic/opus", h.ctx);
+    await m.commands.get("autorouter")!.handler("off", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/opus", h.ctx);
 
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/opus");
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/opus");
@@ -725,14 +770,14 @@ describe("extension wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("pin anthropic/opus", h.ctx);
+    await m.commands.get("autorouter")!.handler("pin anthropic/opus", h.ctx);
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/opus");
-    await m.commands.get("autoroute")!.handler("unpin", h.ctx);
+    await m.commands.get("autorouter")!.handler("unpin", h.ctx);
     expect(refOf((await h.prompt("hi")).model)).toBe("anthropic/haiku");
 
     // Without an argument, pin the model serving the session.
-    await m.commands.get("autoroute")!.handler("pin", h.ctx);
-    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: pinned to anthropic/haiku", "info");
+    await m.commands.get("autorouter")!.handler("pin", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autorouter: pinned to anthropic/haiku", "info");
   });
 
   it("selects autorouter/tiered with `on`", async () => {
@@ -741,10 +786,10 @@ describe("extension wiring", () => {
     const h = harness(m, dir, { model: CATALOGUE[2] });
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("on", h.ctx);
+    await m.commands.get("autorouter")!.handler("on", h.ctx);
 
     expect(m.setModelCalls).toEqual(["autorouter/tiered"]);
-    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: on (autorouter/tiered)", "info");
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autorouter: on (autorouter/tiered)", "info");
   });
 
   it("clears its footer status when another model is selected", async () => {
@@ -755,7 +800,7 @@ describe("extension wiring", () => {
     await h.prompt("hi");
 
     await m.fire("model_select", { source: "set", model: CATALOGUE[3] }, h.ctx);
-    expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("autoroute", undefined);
+    expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("autorouter", undefined);
   });
 
   it("updates a tier and its thinking level from the slash command", async () => {
@@ -763,7 +808,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("tier SIMPLE anthropic/opus high", h.ctx);
+    await m.commands.get("autorouter")!.handler("tier SIMPLE anthropic/opus high", h.ctx);
 
     const routed = await h.prompt("hi");
 
@@ -778,11 +823,11 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("set decisionLog false", h.ctx);
+    await m.commands.get("autorouter")!.handler("set decisionLog false", h.ctx);
 
     const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
     expect(written.decisionLog).toBe(false);
-    await m.commands.get("autoroute")!.handler("", h.ctx);
+    await m.commands.get("autorouter")!.handler("", h.ctx);
     expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("model:    autorouter/tiered (selected)"), "info");
   });
 
@@ -793,7 +838,7 @@ describe("extension wiring", () => {
     await h.start();
     h.ctx.modelRegistry.find = () => undefined;
 
-    await m.commands.get("autoroute")!.handler("next anthropic/nope", h.ctx);
+    await m.commands.get("autorouter")!.handler("next anthropic/nope", h.ctx);
 
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("not a model pi knows"), "error");
   });
@@ -804,7 +849,7 @@ describe("extension wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("tier SIMPLE autorouter/tiered", h.ctx);
+    await m.commands.get("autorouter")!.handler("tier SIMPLE autorouter/tiered", h.ctx);
 
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("is a virtual model"), "error");
     expect(JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"))).toEqual(CONFIG);
@@ -817,7 +862,7 @@ describe("extension wiring", () => {
     const h = harness(m, fresh, { model: CATALOGUE[2] });
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("init project", h.ctx);
+    await m.commands.get("autorouter")!.handler("init project", h.ctx);
 
     const written = JSON.parse(readFileSync(join(fresh, ".pi", "autorouter.json"), "utf8"));
     // The virtual model costs nothing, and would be the "cheapest" model without the filter.
@@ -835,7 +880,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir, { ui: { notify: vi.fn(), setStatus: vi.fn(), confirm: vi.fn(async () => false) } });
     await h.start();
-    await m.commands.get("autoroute")!.handler("init project", h.ctx);
+    await m.commands.get("autorouter")!.handler("init project", h.ctx);
 
     expect(JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"))).toEqual(CONFIG);
     expect(h.ctx.ui.confirm).toHaveBeenCalled();
@@ -846,7 +891,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir, { hasUI: false });
     await h.start();
-    await m.commands.get("autoroute")!.handler("init project", h.ctx);
+    await m.commands.get("autorouter")!.handler("init project", h.ctx);
 
     expect(JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"))).toEqual(CONFIG);
   });
@@ -857,7 +902,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, fresh);
     await h.start();
-    await m.commands.get("autoroute")!.handler("init nosuchprovider project", h.ctx);
+    await m.commands.get("autorouter")!.handler("init nosuchprovider project", h.ctx);
 
     expect(existsSync(join(fresh, ".pi", "autorouter.json"))).toBe(false);
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("no usable models"), "error");
@@ -870,7 +915,7 @@ describe("extension wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, fresh, { scopedModels: [{ model: VIRTUAL }, { model: CATALOGUE[1] }, { model: CATALOGUE[2] }] });
     await h.start();
-    await m.commands.get("autoroute")!.handler("init project", h.ctx);
+    await m.commands.get("autorouter")!.handler("init project", h.ctx);
 
     const written = JSON.parse(readFileSync(join(fresh, ".pi", "autorouter.json"), "utf8"));
     expect(written.defaultModel).toBe("anthropic/haiku");
@@ -905,7 +950,7 @@ describe("decision-model classifier wiring", () => {
     return classify;
   }
 
-  it("routes on Clef's tier and shows it in /autoroute", async () => {
+  it("routes on Clef's tier and shows it in /autorouter", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
     const h = harness(m, projectDir(DECISION_CONFIG));
@@ -926,7 +971,7 @@ describe("decision-model classifier wiring", () => {
     expect(decision.cause).toBe("decision_classifier");
     expect(decision.classifierModel).toBe("openrouter/cloudflare/clef");
 
-    await m.commands.get("autoroute")!.handler("", h.ctx);
+    await m.commands.get("autorouter")!.handler("", h.ctx);
     expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(
       expect.stringContaining("classifier: decision (openrouter/cloudflare/clef, timeout 20ms)"),
       "info",
@@ -950,11 +995,11 @@ describe("decision-model classifier wiring", () => {
     const warnings = (h.ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.filter(([, level]) => level === "warning");
     expect(warnings).toEqual([
       [
-        "autoroute: decision classifier unavailable; used heuristic classification instead (decision classifier timed out after 20ms).",
+        "autorouter: decision classifier unavailable; used heuristic classification instead (decision classifier timed out after 20ms).",
         "warning",
       ],
     ]);
-    await m.commands.get("autoroute")!.handler("", h.ctx);
+    await m.commands.get("autorouter")!.handler("", h.ctx);
     expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("circuit open"), "info");
   });
 
@@ -965,7 +1010,7 @@ describe("decision-model classifier wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("set decisionClassifierConfig.timeoutMs 15000", h.ctx);
+    await m.commands.get("autorouter")!.handler("set decisionClassifierConfig.timeoutMs 15000", h.ctx);
 
     const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
     expect(written.classifierType).toBe("decision");
@@ -1034,7 +1079,7 @@ describe("adaptive wiring", () => {
     autorouter(again.pi as never);
     const h2 = harness(again, dir);
     await h2.start();
-    await again.commands.get("autoroute")!.handler("adaptive", h2.ctx);
+    await again.commands.get("autorouter")!.handler("adaptive", h2.ctx);
     const shown = (h2.ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
     expect(shown).toContain("general:");
     expect(shown).toContain("samples   1");
@@ -1055,7 +1100,7 @@ describe("adaptive wiring", () => {
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("adaptive", h.ctx);
+    await m.commands.get("autorouter")!.handler("adaptive", h.ctx);
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/adaptive selection is off/), "info");
     await h.prompt("hi");
     expect(existsSync(join(home, ".pi", "agent", "autorouter-adaptive.json"))).toBe(false);
@@ -1115,7 +1160,7 @@ describe("semantic keyword matching wiring", () => {
     expect(decision.chosenModel).toBe("anthropic/opus");
     expect(refOf(routed.model)).toBe("anthropic/opus");
 
-    await m.commands.get("autoroute")!.handler("", h.ctx);
+    await m.commands.get("autorouter")!.handler("", h.ctx);
     expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("keywords: semantic (voyage/voyage-3-5"), "info");
   });
 
@@ -1160,7 +1205,7 @@ describe("decision log", () => {
     const lines = component.render(400);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(
-      /^<autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-?\d\.\d{3}, signals=\[.*\], routed_model=anthropic\/haiku>$/,
+      /^<autorouter: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-?\d\.\d{3}, signals=\[.*\], routed_model=anthropic\/haiku>$/,
     );
 
     const expanded = render({ type: "custom", customType: DECISION_ENTRY_TYPE, data: entry.data }, { expanded: true }, THEME) as {
@@ -1190,7 +1235,7 @@ describe("decision log", () => {
       stderr.mockRestore();
     }
     expect(written).toHaveLength(1);
-    expect(written[0]).toMatch(/^autoroute: routing decision cause=heuristic_scorer, .*routed_model=anthropic\/haiku\n$/);
+    expect(written[0]).toMatch(/^autorouter: routing decision cause=heuristic_scorer, .*routed_model=anthropic\/haiku\n$/);
   });
 
   it("can be switched off, leaving the entries recorded but undrawn", async () => {
@@ -1216,22 +1261,22 @@ describe("decision log", () => {
     expect(render({ type: "custom", customType: DECISION_ENTRY_TYPE, data: entry.data }, { expanded: false }, THEME)).toBeUndefined();
   });
 
-  it("replays the session's decisions with /autoroute log", async () => {
+  it("replays the session's decisions with /autorouter log", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
     const h = harness(m, dir);
     await h.start();
-    await m.commands.get("autoroute")!.handler("log", h.ctx);
-    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: no decisions yet this session", "info");
+    await m.commands.get("autorouter")!.handler("log", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autorouter: no decisions yet this session", "info");
 
     await h.prompt("hi");
     await h.prompt("think step by step and analyze this: weigh the options");
-    await m.commands.get("autoroute")!.handler("log", h.ctx);
+    await m.commands.get("autorouter")!.handler("log", h.ctx);
     const all = (h.ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
     expect(all.split("\n")).toHaveLength(2);
     expect(all).toMatch(/tier=SIMPLE.*\n.*tier=REASONING/s);
 
-    await m.commands.get("autoroute")!.handler("log 1", h.ctx);
+    await m.commands.get("autorouter")!.handler("log 1", h.ctx);
     const last = (h.ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
     expect(last.split("\n")).toHaveLength(1);
     expect(last).toContain("tier=REASONING");
