@@ -14,7 +14,7 @@ prompts go to cheap models and hard prompts go to strong ones, automatically.
 It's a TypeScript port of [LiteLLM's Auto Router v2](https://docs.litellm.ai/docs/proxy/auto_routing)
 (`auto_router/complexity_router`), adapted to run inside pi instead of behind a separate LiteLLM proxy
 process. That means no extra network hop, and pi itself knows which model answered: the footer shows the
-routed model next to the selection (`auto • medium → claude-sonnet-5 • high`), each assistant message
+routed model next to the selection (`auto • medium → claude-sonnet-5-5 • high`), each assistant message
 records it, and `/session` lists the cost per physical model.
 
 ## How it works
@@ -71,8 +71,8 @@ names the models it tried.
 ### Thinking levels
 
 `autoroute/auto` offers every thinking level, from `off` to `max`. The level you select is the default for
-tier entries that don't set their own: with `autoroute/auto • low`, a plain `"anthropic/claude-sonnet-5"`
-entry runs at `low`, while `{ "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }` always runs at
+tier entries that don't set their own: with `autoroute/auto • low`, a plain `"anthropic/claude-sonnet-5-5"`
+entry runs at `low`, while `{ "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }` always runs at
 `high`. pi clamps the result to what the routed model supports.
 
 ## Installation
@@ -103,12 +103,12 @@ Selecting any other model takes the router out of the loop until you select `aut
 
 ```json
 {
-  "defaultModel": "anthropic/claude-haiku-4-5",
+  "defaultModel": "anthropic/claude-haiku-5-5",
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   }
 }
 ```
@@ -118,7 +118,7 @@ a virtual model, `autoroute/auto` included, cannot be routed to and is skipped. 
 shape as a tier entry, so it can carry a thinking level too:
 
 ```json
-{ "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" } }
+{ "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" } }
 ```
 
 ### Example: heuristic classifier (default)
@@ -128,12 +128,12 @@ Full file: [`examples/autorouter.heuristic.json`](examples/autorouter.heuristic.
 
 ```json
 {
-  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
+  "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   },
   "keywordTierRules": [
     { "keywords": ["migration", "schema change", "security review"], "tier": "REASONING" },
@@ -161,10 +161,10 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
 
 ```json
 {
-  "defaultModel": { "model": "anthropic/claude-haiku-4-5", "thinkingLevel": "low" },
+  "defaultModel": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
   "classifierType": "llm",
   "classifierLLMConfig": {
-    "model": "anthropic/claude-haiku-4-5",
+    "model": "anthropic/claude-haiku-5-5",
     "classificationRubric": "agentic",
     "timeoutMs": 3000
   },
@@ -173,10 +173,10 @@ Full file: [`examples/autorouter.llm.json`](examples/autorouter.llm.json).
   "classifierContextPerTurnChars": 200,
   "classifierContextIncludeAssistantTurns": false,
   "tiers": {
-    "SIMPLE": "anthropic/claude-haiku-4-5",
-    "MEDIUM": "anthropic/claude-sonnet-5",
-    "COMPLEX": "anthropic/claude-sonnet-5",
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": "anthropic/claude-haiku-5-5",
+    "MEDIUM": "anthropic/claude-sonnet-5-5",
+    "COMPLEX": "anthropic/claude-sonnet-5-5",
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high" }
   }
 }
 ```
@@ -247,12 +247,14 @@ under another `classifierType` is ignored with a warning.
 ### Example: mixing providers
 
 Tiers are independent, so each can name whichever provider does that job best - and the classifier can be a
-third. Here OpenAI covers the cheap tiers, Anthropic the hard ones, and a small Mistral model classifies.
+third. Here Anthropic covers the cheapest and the hardest tiers, OpenAI the everyday ones, and a small Mistral
+model classifies. Terra comes through a ChatGPT plan (`openai-codex/`, sign in with `/login`); with an OpenAI
+API key instead, write `openai/gpt-6.1-terra` once pi's `openai` catalog lists it.
 Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.json).
 
 ```json
 {
-  "defaultModel": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
+  "defaultModel": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
   "classifierType": "llm",
   "classifierLLMConfig": {
     "model": "mistral/mistral-small-2603",
@@ -264,16 +266,44 @@ Full file: [`examples/autorouter.multillm.json`](examples/autorouter.multillm.js
   "classifierContextPerTurnChars": 200,
   "classifierContextIncludeAssistantTurns": false,
   "tiers": {
-    "SIMPLE": { "model": "openai/gpt-5.6-luna", "thinkingLevel": "low" },
-    "MEDIUM": { "model": "openai/gpt-5.6-terra", "thinkingLevel": "medium" },
-    "COMPLEX": { "model": "anthropic/claude-sonnet-5", "thinkingLevel": "high" },
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high" }
+    "SIMPLE": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
+    "MEDIUM": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "xhigh" }
   }
 }
 ```
 
 Every model named must be one pi can reach with its own credentials; a tier whose provider has no key falls
 down the chain to the next usable candidate, and the decision log says so under `fallback=`.
+
+### Example: recommended
+
+The same tiers as the mixed-provider example, with TypeSafe's Jev deciding the tier: one structured
+[decision-model](#example-decision-model-classifier-jev-clef) call per prompt instead of a chat completion,
+and a timeout or error still falls back to the local scorer. It also shows Jev the assistant's latest reply
+(`classifierContextIncludeAssistantTurns`), so a "yes" to a proposal is rated by the proposed work.
+
+Needs `TYPESAFE_API_KEY`, your Anthropic credentials and a ChatGPT sign-in for Terra. Full file:
+[`examples/autorouter.recommended.json`](examples/autorouter.recommended.json).
+
+```json
+{
+  "defaultModel": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+  "classifierType": "decision",
+  "decisionClassifierConfig": { "model": "typesafe/jev-latest", "timeoutMs": 3000 },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": true,
+  "tiers": {
+    "SIMPLE": { "model": "anthropic/claude-haiku-5-5", "thinkingLevel": "medium" },
+    "MEDIUM": { "model": "openai-codex/gpt-6.1-terra", "thinkingLevel": "medium" },
+    "COMPLEX": { "model": "anthropic/claude-sonnet-5-5", "thinkingLevel": "high" },
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "xhigh" }
+  }
+}
+```
 
 Use the heuristic classifier by default; switch to `llm` if the scorer keeps misjudging your traffic and you
 can tolerate the extra latency. `/autoroute init [provider] [project] [llm]` accepts all three flags together
@@ -314,7 +344,7 @@ own, `ok` is `SIMPLE` - so the session drops to Haiku, and Haiku is the model th
 answer. The turn carries no information about the work, so the honest thing is not to score it at all:
 
 ```
-autoroute: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=heuristic_scorer, tier=COMPLEX, routed_model=anthropic/claude-sonnet-5-5
 autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
 ```
 
@@ -409,10 +439,10 @@ its cold-start phase (unobserved models in the classified tier are tried uniform
   "tierDistancePenalty": 0.5,
   "adaptiveEligible": "all",
   "tiers": {
-    "SIMPLE": [{ "model": "anthropic/claude-haiku-4-5", "qualityTier": 1, "strengths": ["factual_lookup"] }],
-    "MEDIUM": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
-    "COMPLEX": [{ "model": "anthropic/claude-sonnet-5", "qualityTier": 2, "strengths": ["code_generation"] }],
-    "REASONING": { "model": "anthropic/claude-opus-5", "thinkingLevel": "high", "qualityTier": 3 }
+    "SIMPLE": [{ "model": "anthropic/claude-haiku-5-5", "qualityTier": 1, "strengths": ["factual_lookup"] }],
+    "MEDIUM": ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5"],
+    "COMPLEX": [{ "model": "anthropic/claude-sonnet-5-5", "qualityTier": 2, "strengths": ["code_generation"] }],
+    "REASONING": { "model": "anthropic/claude-opus-5-5", "thinkingLevel": "high", "qualityTier": 3 }
   }
 }
 ```
@@ -440,14 +470,14 @@ On by default. Every routing decision prints one line in the shape of upstream's
 against pi's console and a LiteLLM proxy log:
 
 ```
-autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-4-5
-autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5, thinking=high, keyword="migration"
-autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5, thinking=high
-autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5
-autoroute: routing decision cause=decision_classifier, tier=COMPLEX, signals=[typesafe-classifier:COMPLEX, typesafe-confidence=0.812000, tier-probability:SIMPLE=0.021000, tier-probability:MEDIUM=0.142000, tier-probability:COMPLEX=0.812000, tier-probability:REASONING=0.025000], routed_model=anthropic/claude-sonnet-5
-autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5
+autoroute: routing decision cause=heuristic_scorer, tier=SIMPLE, score=-0.150, signals=[short (7 tokens), simple (what is)], routed_model=anthropic/claude-haiku-5-5
+autoroute: routing decision cause=literal_keyword_match, tier=REASONING, routed_model=anthropic/claude-opus-5-5, thinking=high, keyword="migration"
+autoroute: routing decision cause=semantic_keyword_match, tier=REASONING, signals=[semantic_match (0.81 ≈ "kubernetes deployment")], routed_model=anthropic/claude-opus-5-5, thinking=high
+autoroute: routing decision cause=llm_classifier, tier=COMPLEX, signals=[llm_classifier], routed_model=anthropic/claude-sonnet-5-5
+autoroute: routing decision cause=decision_classifier, tier=COMPLEX, signals=[typesafe-classifier:COMPLEX, typesafe-confidence=0.812000, tier-probability:SIMPLE=0.021000, tier-probability:MEDIUM=0.142000, tier-probability:COMPLEX=0.812000, tier-probability:REASONING=0.025000], routed_model=anthropic/claude-sonnet-5-5
+autoroute: routing decision cause=session_affinity_pin, tier=MEDIUM, routed_model=anthropic/claude-sonnet-5-5
 autoroute: routing decision cause=question_reply, tier=COMPLEX, signals=[question_reply (ask_user_question)], routed_model=(unchanged)
-autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-4-5, thinking=low
+autoroute: routing decision cause=default_model_fallback, signals=[classifier timed out after 3000ms], routed_model=anthropic/claude-haiku-5-5, thinking=medium
 ```
 
 pi-specific fields (`thinking`, `keyword`, `escalated`, `plan_floored`, `fallback`, the adaptive phase under
@@ -484,8 +514,8 @@ the full breakdown `/autoroute explain` would show.
 setting without restarting Pi. For example:
 
 ```text
-/autoroute tier REASONING anthropic/claude-opus-5 high
-/autoroute next anthropic/claude-sonnet-5 medium
+/autoroute tier REASONING anthropic/claude-opus-5-5 high
+/autoroute next anthropic/claude-sonnet-5-5 medium
 /autoroute set tierBoundaries.medium 0.35
 /autoroute set questionReply.enabled false
 /autoroute set keywordTierRules [{"keywords":["migration"],"tier":"REASONING"}]

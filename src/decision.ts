@@ -70,7 +70,7 @@ export function classifierFallbackNotice(decision: RouteDecision): string | null
   return null;
 }
 
-/** Compact footer text: `⏵ COMPLEX · claude-sonnet-5`. */
+/** Compact footer text: `⏵ COMPLEX · claude-sonnet-5-5`. */
 export function statusLine(decision: RouteDecision): string {
   if (!decision.chosenModel) {
     // A hold is intentional; an exhausted candidate list is not. Keep the latter visible

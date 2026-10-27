@@ -1,0 +1,33 @@
+{
+  "defaultModel": {
+    "model": "openai-codex/gpt-6.1-terra",
+    "thinkingLevel": "medium"
+  },
+  "classifierType": "decision",
+  "decisionClassifierConfig": {
+    "model": "typesafe/jev-latest",
+    "timeoutMs": 3000
+  },
+  "classifierFallback": "heuristic",
+  "classifierContextWindowSize": 3,
+  "classifierContextPerTurnChars": 200,
+  "classifierContextIncludeAssistantTurns": true,
+  "tiers": {
+    "SIMPLE": {
+      "model": "anthropic/claude-haiku-5-5",
+      "thinkingLevel": "medium"
+    },
+    "MEDIUM": {
+      "model": "openai-codex/gpt-6.1-terra",
+      "thinkingLevel": "medium"
+    },
+    "COMPLEX": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "thinkingLevel": "high"
+    },
+    "REASONING": {
+      "model": "anthropic/claude-opus-5-5",
+      "thinkingLevel": "xhigh"
+    }
+  }
+}

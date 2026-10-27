@@ -409,7 +409,7 @@ export default function autorouter(pi: ExtensionAPI): void {
   const checkCommandModel = (model: string, ctx: ExtensionContext): string | null => {
     const ref = splitModelRef(model);
     const found = ref ? ctx.modelRegistry.find(ref.provider, ref.modelId) : undefined;
-    if (!found) return `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5.`;
+    if (!found) return `autoroute: "${model}" is not a model pi knows. Use provider/model-id, e.g. anthropic/claude-opus-5-5.`;
     if (isVirtualModel(found)) return `autoroute: "${model}" is a virtual model; route to a physical model instead.`;
     return null;
   };

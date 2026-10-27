@@ -343,18 +343,33 @@ describe("example configs", () => {
     const { config, errors, warnings } = load(name);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
-    expect(config.defaultModel).toBe("anthropic/claude-haiku-4-5");
-    expect(config.defaultModelThinkingLevel).toBe("low");
+    expect(config.defaultModel).toBe("anthropic/claude-haiku-5-5");
+    expect(config.defaultModelThinkingLevel).toBe("medium");
   });
 
   it("examples/autorouter.multillm.json spreads tiers across providers", () => {
     const { config, errors, warnings } = load("multillm");
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
-    expect(config.defaultModel).toBe("openai/gpt-5.6-terra");
+    expect(config.defaultModel).toBe("openai-codex/gpt-6.1-terra");
     expect(config.defaultModelThinkingLevel).toBe("medium");
     expect(config.classifierType).toBe("llm");
     expect(config.classifierLLMConfig?.model).toBe("mistral/mistral-small-2603");
-    expect(config.tiers.REASONING).toEqual([{ model: "anthropic/claude-opus-5", thinkingLevel: "high" }]);
+    expect(config.tiers.SIMPLE).toEqual([{ model: "anthropic/claude-haiku-5-5", thinkingLevel: "medium" }]);
+    expect(config.tiers.MEDIUM).toEqual([{ model: "openai-codex/gpt-6.1-terra", thinkingLevel: "medium" }]);
+    expect(config.tiers.REASONING).toEqual([{ model: "anthropic/claude-opus-5-5", thinkingLevel: "xhigh" }]);
+  });
+
+  it("examples/autorouter.recommended.json uses the mixed-provider tiers with Jev deciding", () => {
+    const { config, errors, warnings } = load("recommended");
+    const multillm = load("multillm").config;
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(config.classifierType).toBe("decision");
+    expect(config.decisionClassifierConfig?.model).toBe("typesafe/jev-latest");
+    expect(config.classifierContextIncludeAssistantTurns).toBe(true);
+    expect(config.tiers).toEqual(multillm.tiers);
+    expect(config.defaultModel).toBe(multillm.defaultModel);
+    expect(config.defaultModelThinkingLevel).toBe(multillm.defaultModelThinkingLevel);
   });
 });
