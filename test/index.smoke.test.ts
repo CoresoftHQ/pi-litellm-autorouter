@@ -144,7 +144,7 @@ function mockPi(options: { virtualModels?: boolean } = {}) {
 type MockPi = ReturnType<typeof mockPi>;
 
 /**
- * A session with `autoroute/auto` selected, driven the way pi drives it: the prompt is
+ * A session with `autorouter/tiered` selected, driven the way pi drives it: the prompt is
  * persisted, then the router is asked for a model, then the response is persisted under
  * the model that answered. Router state is carried between requests like pi's
  * `pi.virtual-model-state` entries.
@@ -310,8 +310,8 @@ describe("extension wiring", () => {
 
     expect(m.virtualModels).toHaveLength(1);
     const [router] = m.virtualModels;
-    expect(router?.provider).toBe("autoroute");
-    expect(router?.id).toBe("auto");
+    expect(router?.provider).toBe("autorouter");
+    expect(router?.id).toBe("tiered");
     expect(router?.thinkingLevels).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     expect(m.pi.registerFlag).toHaveBeenCalledWith("no-autoroute", expect.anything());
     expect(m.commands.has("autoroute")).toBe(true);
@@ -338,7 +338,7 @@ describe("extension wiring", () => {
     const routed = await h.prompt("hi");
 
     expect(refOf(routed.model)).toBe("anthropic/haiku");
-    // Routing is a route, never a model switch: the selection stays autoroute/auto.
+    // Routing is a route, never a model switch: the selection stays autorouter/tiered.
     expect(m.setModelCalls).toEqual([]);
     const decision = m.decisions()[0]!;
     expect(decision.tier).toBe("SIMPLE");
@@ -735,7 +735,7 @@ describe("extension wiring", () => {
     expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: pinned to anthropic/haiku", "info");
   });
 
-  it("selects autoroute/auto with `on`", async () => {
+  it("selects autorouter/tiered with `on`", async () => {
     const m = mockPi();
     autorouter(m.pi as never);
     const h = harness(m, dir, { model: CATALOGUE[2] });
@@ -743,8 +743,8 @@ describe("extension wiring", () => {
 
     await m.commands.get("autoroute")!.handler("on", h.ctx);
 
-    expect(m.setModelCalls).toEqual(["autoroute/auto"]);
-    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: on (autoroute/auto)", "info");
+    expect(m.setModelCalls).toEqual(["autorouter/tiered"]);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("autoroute: on (autorouter/tiered)", "info");
   });
 
   it("clears its footer status when another model is selected", async () => {
@@ -783,7 +783,7 @@ describe("extension wiring", () => {
     const written = JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"));
     expect(written.decisionLog).toBe(false);
     await m.commands.get("autoroute")!.handler("", h.ctx);
-    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("model:    autoroute/auto (selected)"), "info");
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("model:    autorouter/tiered (selected)"), "info");
   });
 
   it("rejects an unknown model at command time rather than at the next prompt", async () => {
@@ -804,7 +804,7 @@ describe("extension wiring", () => {
     const h = harness(m, dir);
     await h.start();
 
-    await m.commands.get("autoroute")!.handler("tier SIMPLE autoroute/auto", h.ctx);
+    await m.commands.get("autoroute")!.handler("tier SIMPLE autorouter/tiered", h.ctx);
 
     expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("is a virtual model"), "error");
     expect(JSON.parse(readFileSync(join(dir, ".pi", "autorouter.json"), "utf8"))).toEqual(CONFIG);
@@ -822,9 +822,9 @@ describe("extension wiring", () => {
     const written = JSON.parse(readFileSync(join(fresh, ".pi", "autorouter.json"), "utf8"));
     // The virtual model costs nothing, and would be the "cheapest" model without the filter.
     expect(written.defaultModel).toBe("openai/gpt-mini");
-    expect(JSON.stringify(written)).not.toContain("autoroute/auto");
+    expect(JSON.stringify(written)).not.toContain("autorouter/tiered");
     expect(written.tiers.REASONING).toEqual({ model: "anthropic/opus", thinkingLevel: "high" });
-    expect(m.setModelCalls).toEqual(["autoroute/auto"]);
+    expect(m.setModelCalls).toEqual(["autorouter/tiered"]);
 
     // The new config takes effect without a restart.
     expect(refOf((await h.prompt("hi")).model)).toBe("openai/gpt-mini");

@@ -4,9 +4,9 @@
  * Wiring only: the routing decision itself lives in `router.ts`, which has no pi imports
  * so it can be tested without an agent.
  *
- * The seam is a pi virtual model, `autoroute/auto`. Selecting it in `/model` (or with
- * `--model autoroute/auto`) is what turns routing on; pi then asks this extension for a
- * physical model before every request. The selection stays `autoroute/auto`, while each
+ * The seam is a pi virtual model, `autorouter/tiered`. Selecting it in `/model` (or with
+ * `--model autorouter/tiered`) is what turns routing on; pi then asks this extension for a
+ * physical model before every request. The selection stays `autorouter/tiered`, while each
  * assistant message records the model that actually answered, so nothing here ever calls
  * `pi.setModel()` to route a prompt. Picking any other model leaves the router alone.
  *
@@ -74,10 +74,10 @@ import {
 
 const STATUS_KEY = "autoroute";
 
-/** The router's place in pi's model catalog: `autoroute/auto`. The provider id is used by
+/** The router's place in pi's model catalog: `autorouter/tiered`. The provider id is used by
  *  nothing else, so the model needs no credentials of its own and is always selectable. */
-export const VIRTUAL_PROVIDER = "autoroute";
-export const VIRTUAL_MODEL_ID = "auto";
+export const VIRTUAL_PROVIDER = "autorouter";
+export const VIRTUAL_MODEL_ID = "tiered";
 export const VIRTUAL_MODEL_REF = `${VIRTUAL_PROVIDER}/${VIRTUAL_MODEL_ID}`;
 
 /**
@@ -249,7 +249,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
   pi.registerFlag("no-autoroute", {
-    description: "Start with automatic model routing paused (autoroute/auto holds its current model)",
+    description: "Start with automatic model routing paused (autorouter/tiered holds its current model)",
     type: "boolean",
     default: false,
   });
@@ -414,7 +414,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     return null;
   };
 
-  /** Make `autoroute/auto` the session's model. Never persists it as the global default. */
+  /** Make `autorouter/tiered` the session's model. Never persists it as the global default. */
   const selectRouterModel = async (ctx: ExtensionContext): Promise<boolean> => {
     if (isRouterModel(ctx.model)) return true;
     try {
@@ -460,7 +460,7 @@ export default function autorouter(pi: ExtensionAPI): void {
 
   const routeRequest = async (request: RouteRequest, ctx: ExtensionContext): Promise<Route> => {
     const lookup: ModelLookup = ctx.modelRegistry;
-    // A tier entry without a thinking level takes the level selected on autoroute/auto;
+    // A tier entry without a thinking level takes the level selected on autorouter/tiered;
     // pi clamps whatever is returned to what the routed model supports.
     const toRoute = (target: unknown, level: ThinkingLevel | null | undefined): Route => ({
       model: target as PiModel,
@@ -621,7 +621,7 @@ export default function autorouter(pi: ExtensionAPI): void {
     pi.registerVirtualModel<BranchState>({
       provider: VIRTUAL_PROVIDER,
       id: VIRTUAL_MODEL_ID,
-      name: "Auto router",
+      name: "Tiered auto router",
       // The selected level is the default for tier entries that do not set their own.
       thinkingLevels: THINKING_LEVELS,
       route: routeRequest,
