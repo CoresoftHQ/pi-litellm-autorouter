@@ -227,7 +227,8 @@ Any classifier model pi supports works, including ones a pi update or `models.js
 | Clef, OpenRouter | `openrouter/cloudflare/clef`, `openrouter/cloudflare/clef-flash`, `openrouter/cloudflare/clef-omni` |
 | OpenAI's Decisions API | `openai/gpt-6-luna` (needs `OPENAI_API_KEY`, not a ChatGPT login) |
 
-pi lists more; see pi's [classifier models](https://pi.dev/docs/latest/models#use-classifier-models).
+pi lists more; see pi's [classifier models](https://pi.dev/docs/latest/models#use-classifier-models). The table
+reflects pi 1.4's catalog - some entries (GPT-6 Luna, for one) need a newer pi than the 0.99 the router itself requires.
 
 | Key (`decisionClassifierConfig`) | Default | Purpose |
 | --- | --- | --- |
